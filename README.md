@@ -9,7 +9,7 @@ Code Interpreter (internally `codeapi`, the prefix used by its env vars, images,
 This fork is maintained directly rather than receiving snapshot commits from an
 upstream monorepo. CI builds and tests the checked-out source, while
 `.github/workflows/build-images.yml` publishes all six `linux/amd64` images to
-`ghcr.io/ricky-hao` with immutable `sha-<full-commit>` and
+`ghcr.io/ricky-hao/code-interpreter-*` with immutable `sha-<full-commit>` and
 `sha-<12-character-commit>` tags. Deployments should pin the recorded OCI
 digest; the workflow intentionally does not publish mutable `latest` tags.
 
