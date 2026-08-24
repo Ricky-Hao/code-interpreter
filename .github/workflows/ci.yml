@@ -28,6 +28,12 @@ jobs:
       - name: Runtime resolver handoff
         run: tests/runtime_resolver_handoff.sh
 
+      - name: Install policy test dependencies
+        run: |
+          python3 -m venv /tmp/codeapi-policy-venv
+          /tmp/codeapi-policy-venv/bin/pip install --disable-pip-version-check PyYAML==6.0.2
+          echo /tmp/codeapi-policy-venv/bin >>"${GITHUB_PATH}"
+
       - name: Sandbox NetworkPolicy modes
         run: tests/network_policy_networking.sh
 
