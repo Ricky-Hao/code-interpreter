@@ -1,4 +1,4 @@
-name: Build Code Interpreter images
+name: Code Interpreter CI and images
 
 on:
   pull_request:
@@ -21,9 +21,10 @@ on:
     branches: [main]
     paths:
       - .dockerignore
-      - .github/workflows/build-images.yml
       - api/**
       - docker/**
+      - docker-compose*.yml
+      - helm/**
       - launcher/**
       - scripts/**
       - service/**
@@ -62,12 +63,18 @@ jobs:
         working-directory: launcher
         run: cargo test
 
-  runtime-network-tests:
-    name: Runtime network tests
+  deployment-tests:
+    name: Runtime and deployment tests
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Test block-root package delivery
+        run: tests/block_root_package_delivery.sh
+
+      - name: Test sandbox-runner liveness
+        run: tests/sandbox_runner_healthcheck.sh
 
       - name: Test resolver handoff
         run: tests/runtime_resolver_handoff.sh
@@ -116,11 +123,22 @@ jobs:
       - name: Build source
         run: bun run build
 
+      - name: Compile and smoke-test spec-guard
+        if: matrix.workspace == 'api'
+        working-directory: api/src
+        run: |
+          gcc -O2 -static -Wall -Wextra -Werror -o /tmp/spec-guard spec-guard.c
+          parent_fds=$(bash -c 'exec 10<&0 11<&0 12<&0 13<&0 14<&0; ls /proc/self/fd | wc -l')
+          child_fds=$(bash -c 'exec 10<&0 11<&0 12<&0 13<&0 14<&0; /tmp/spec-guard /bin/ls /proc/self/fd | wc -l')
+          test "$parent_fds" -ge 8
+          test "$child_fds" -le 5
+
       - name: Run tests
         run: bun run test
 
   dockerfile-checks:
     name: Validate ${{ matrix.image }}
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -166,9 +184,8 @@ jobs:
       github.event_name != 'pull_request' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     needs:
-      - dockerfile-checks
+      - deployment-tests
       - launcher-tests
-      - runtime-network-tests
       - source-tests
     permissions:
       attestations: write
@@ -266,9 +283,8 @@ jobs:
       github.event_name != 'pull_request' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     needs:
-      - dockerfile-checks
+      - deployment-tests
       - launcher-tests
-      - runtime-network-tests
       - source-tests
     permissions:
       attestations: write
