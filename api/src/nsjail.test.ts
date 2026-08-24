@@ -33,6 +33,18 @@ function seccompPolicy(): string {
 }
 
 describe('NsJail args', () => {
+  test('mounts the system CA trust store read-only', async () => {
+    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+    expect(cfg).toContain([
+      'mount {',
+      '    src: "/etc/ssl/certs"',
+      '    dst: "/etc/ssl/certs"',
+      '    is_bind: true',
+      '    rw: false',
+      '}',
+    ].join('\n'));
+  });
+
   test('shares networking and mounts the resolver only when networking is enabled', () => {
     const originalDisableNetworking = config.disable_networking;
     const options = {
