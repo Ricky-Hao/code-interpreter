@@ -1,6 +1,25 @@
 #!/bin/bash
 set -e
 
+# shellcheck source=../docker/runtime-resolver.sh
+. /usr/local/libexec/codeapi-runtime-resolver.sh
+
+if codeapi_networking_enabled "${SANDBOX_DISABLE_NETWORKING:-true}"; then
+    if grep -Eq '^[[:space:]]*nameserver[[:space:]]+(127\.|::1([[:space:]]|$))' /etc/resolv.conf; then
+        # TSI cannot use container-local DNS listeners such as Docker's
+        # 127.0.0.11. Public DNS keeps Compose KVM mode functional.
+        SANDBOX_RESOLV_CONF_B64=$(printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' | base64 | tr -d '\n')
+        echo "[entrypoint] Using public DNS fallback for TSI networking"
+    else
+        SANDBOX_RESOLV_CONF_B64=$(codeapi_encode_resolver_file /etc/resolv.conf) || {
+            echo "[entrypoint] Invalid runtime resolver configuration" >&2
+            exit 1
+        }
+        echo "[entrypoint] Forwarding runtime resolver into the microVM"
+    fi
+    export SANDBOX_RESOLV_CONF_B64
+fi
+
 # Resolve Docker Compose service names to IPs before entering the microVM.
 # libkrun's TSI networking doesn't have access to Docker's embedded DNS (127.0.0.11),
 # so DNS-based service discovery won't work inside the guest.

@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# shellcheck source=../../docker/runtime-resolver.sh
+. /usr/local/libexec/codeapi-runtime-resolver.sh
+
 echo "Starting NsJail sandbox API..."
 
 # Raise the RLIMIT_NOFILE limits so per-job nsjail can set its own soft
@@ -33,6 +36,18 @@ else
     echo "WARNING: tmpfs mount on /tmp failed — falling back to rootfs"
 fi
 
+if codeapi_networking_enabled "${SANDBOX_DISABLE_NETWORKING:-true}"; then
+    if ! codeapi_write_runtime_resolver \
+        "${SANDBOX_RESOLV_CONF_B64:-}" \
+        /etc/resolv.conf \
+        /tmp/codeapi-resolv.conf; then
+        echo "FATAL: unable to prepare the sandbox resolver" >&2
+        exit 1
+    fi
+    unset SANDBOX_RESOLV_CONF_B64
+    echo "Prepared runtime resolver for network-enabled sandboxes"
+fi
+
 # Create directories needed by NsJail
 mkdir -p /tmp/sandbox
 chown 0:0 /tmp/sandbox 2>/dev/null || true
@@ -42,8 +57,9 @@ chmod 711 /tmp/sandbox
 # The launcher exposes host directories as virtiofs tags that need explicit mounting.
 if grep -q virtiofs /proc/filesystems 2>/dev/null; then
     if [ -d /pkgs ]; then
-        mount -t virtiofs packages /pkgs 2>/dev/null && \
-            echo "Mounted virtiofs 'packages' at /pkgs" || true
+        if mount -t virtiofs packages /pkgs 2>/dev/null; then
+            echo "Mounted virtiofs 'packages' at /pkgs"
+        fi
     fi
 fi
 
@@ -177,6 +193,8 @@ if [ "$SANDBOX_USE_CGROUPV2" = "true" ]; then
     NSJAIL_CGROUP_ARGS=(--use_cgroupv2)
 fi
 
+# Expansion belongs to the jailed /bin/sh.
+# shellcheck disable=SC2016
 if timeout 10 /usr/sbin/nsjail --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
     "${NSJAIL_CGROUP_ARGS[@]}" --log "$SMOKE_LOG" \
     --user "65534:${SMOKE_OUTSIDE_UID}:1" --group "65534:${SMOKE_OUTSIDE_GID}:1" \

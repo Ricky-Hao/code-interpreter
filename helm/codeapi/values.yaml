@@ -250,6 +250,7 @@ workerSandbox:
     outputMaxSize: 65536
     maxOpenFiles: 2048
     executeBodyLimit: 50mb
+    # false also renders unrestricted sandbox-runner NetworkPolicy egress.
     disableNetworking: true
     maxConcurrentJobs: 8
     perJobUids: true

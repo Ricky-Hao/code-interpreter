@@ -269,5 +269,13 @@ export async function authorizeRequestedFiles(args: {
     }
   }
 
-  return requestedFiles;
+  /* Every supplied alias is authorized above before equivalent storage
+   * objects are collapsed, so duplicates cannot bypass ownership checks. */
+  const authorizedObjects = new Set<string>();
+  return requestedFiles.filter((file) => {
+    const storageIdentity = `${file.storage_session_id}\0${file.id}`;
+    if (authorizedObjects.has(storageIdentity)) return false;
+    authorizedObjects.add(storageIdentity);
+    return true;
+  });
 }

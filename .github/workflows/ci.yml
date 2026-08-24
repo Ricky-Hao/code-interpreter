@@ -1,17 +1,8 @@
-# Standalone CI for the public LibreChat-AI/code-interpreter repo, which is
-# published from services/codeapi as snapshot commits (see
-# .github/workflows/publish-codeapi.yml in the monorepo). This file is
-# inert inside the monorepo — GitHub only runs workflows from the repo
-# root — and becomes the root workflow in the published repo. Keep it in
-# sync with ci-codeapi.yml.
 name: CI
 
 on:
   push:
-    # sync/** is included because the sync PR is opened by the GitHub Actions
-    # bot, whose events don't trigger pull_request workflows — the push-event
-    # runs on the branch satisfy the PR's checks instead.
-    branches: [main, 'sync/**']
+    branches: [main]
   pull_request:
 
 permissions:
@@ -34,10 +25,17 @@ jobs:
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 
+      - name: Runtime resolver handoff
+        run: tests/runtime_resolver_handoff.sh
+
+      - name: Sandbox NetworkPolicy modes
+        run: tests/network_policy_networking.sh
+
       - name: Validate sandbox Dockerfiles
         run: |
           docker buildx build --check -f api/Dockerfile .
           docker buildx build --check -f docker/Dockerfile.worker-sandbox .
+          docker buildx build --check -f launcher/Dockerfile .
 
   api-unit-tests:
     name: API Unit Tests

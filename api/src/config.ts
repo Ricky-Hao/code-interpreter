@@ -22,6 +22,23 @@ export function safeInt(raw: string | undefined, fallback: number, min = 1): num
   return Math.floor(n);
 }
 
+export function safeBoolean(raw: string | undefined, fallback: boolean): boolean {
+  switch (raw?.trim().toLowerCase()) {
+    case '1':
+    case 'true':
+    case 'yes':
+    case 'on':
+      return true;
+    case '0':
+    case 'false':
+    case 'no':
+    case 'off':
+      return false;
+    default:
+      return fallback;
+  }
+}
+
 const egressGatewayUrl = process.env.EGRESS_GATEWAY_URL ?? '';
 const requireExecutionManifest = (
   process.env.SANDBOX_REQUIRE_EGRESS_MANIFEST
@@ -50,7 +67,7 @@ export const config = {
   packages_directory: cleanDirectory(process.env.SANDBOX_PACKAGES_DIRECTORY)
     ?? legacyPackagesDirectory(process.env.SANDBOX_DATA_DIRECTORY)
     ?? '/pkgs',
-  disable_networking: (process.env.SANDBOX_DISABLE_NETWORKING ?? 'true') === 'true',
+  disable_networking: safeBoolean(process.env.SANDBOX_DISABLE_NETWORKING, true),
   use_cgroupv2: (process.env.SANDBOX_USE_CGROUPV2 ?? 'true') === 'true',
   allowed_local_network_port: Number(process.env.SANDBOX_ALLOWED_LOCAL_NETWORK_PORT ?? 0),
   output_max_size: Number(process.env.SANDBOX_OUTPUT_MAX_SIZE ?? 1024),

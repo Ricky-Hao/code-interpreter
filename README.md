@@ -4,25 +4,35 @@ Sandboxed code execution service for LibreChat, providing secure execution of us
 
 ## Overview
 
-Code Interpreter (internally `codeapi`, the prefix used by its env vars, images, and helm chart) is a multi-component service that enables LibreChat to safely execute user code in isolated sandboxes. It consists of five independently scalable components that communicate via Redis queues and S3-compatible storage.
+Code Interpreter (internally `codeapi`, the prefix used by its env vars, images, and helm chart) is a multi-component service that enables LibreChat to safely execute user code in isolated sandboxes. It consists of six independently scalable components that communicate via Redis queues and S3-compatible storage.
+
+This fork is maintained directly rather than receiving snapshot commits from an
+upstream monorepo. CI builds and tests the checked-out source, while
+`.github/workflows/build-images.yml` publishes all six `linux/amd64` images to
+`ghcr.io/ricky-hao` with immutable `sha-<full-commit>` and
+`sha-<12-character-commit>` tags. Deployments should pin the recorded OCI
+digest; the workflow intentionally does not publish mutable `latest` tags.
 
 ## Components
 
 - **API** - HTTP gateway that accepts code execution requests and returns results
-- **Worker Sandbox** - Executes code in NsJail (or libkrun microVM) sandboxes with resource limits
+- **Service Worker** - Consumes queued execution jobs and dispatches them to a sandbox
+- **Sandbox Runner** - Executes code in NsJail inside a libkrun microVM with resource limits
 - **File Server** - Manages file uploads/downloads via S3 (IRSA authentication)
+- **Egress Gateway** - Enforces artifact grants and proxies authenticated sandbox tool calls
 - **Tool Call Server** - Handles programmatic tool calls from within sandbox sessions
-- **Package Delivery** - Bakes Python, Node, and Bun into the default microVM
-  block-root image; a package-init PVC mode remains available for direct NsJail
-  development
+
+Python, Node, and Bun are baked into the default microVM block-root image. A
+package-init PVC mode remains available for direct NsJail development.
 
 ## Architecture
 
 1. LibreChat sends a code execution request to the **API**
 2. API enqueues the job in Redis
-3. **Worker Sandbox** picks up the job and executes code inside an isolated sandbox
-4. Files are persisted/retrieved via the **File Server** (backed by S3)
-5. Tool calls from within sandboxes are routed through the **Tool Call Server**
+3. **Service Worker** picks up the job and sends it to the **Sandbox Runner**
+4. **Sandbox Runner** executes code inside an isolated sandbox
+5. Files are persisted/retrieved through the **Egress Gateway** and **File Server**
+6. Programmatic tool calls are routed through the **Egress Gateway** to the **Tool Call Server**
 
 ## Execution profiles
 
@@ -65,19 +75,33 @@ Two modes are supported:
 - **NsJail mode** (`kvmEnabled: false`): Direct NsJail sandboxing with Linux namespaces and cgroups
 - **MicroVM mode** (`kvmEnabled: true`): libkrun microVM with its own kernel, NsJail runs inside the guest
 
+`SANDBOX_DISABLE_NETWORKING=false` deliberately gives executed code unrestricted
+network access. NsJail shares the runner network namespace, receives the runner's
+runtime resolver configuration through the microVM and mounts it read-only, and
+permits ordinary IPv4/IPv6 sockets through its seccomp policy. A public resolver
+fallback is used when the container resolver is loopback-only and therefore
+unreachable through libkrun TSI. The default remains `true`; deployment
+configuration must opt in explicitly.
+
+With networking enabled, sandbox code can reach both public and private networks
+allowed by the node and can exfiltrate supplied input data. Direct traffic bypasses
+the egress gateway. The gateway and tool-call server remain required for their
+artifact and programmatic tool-call capability paths, but they do not constrain
+general sandbox networking.
+
 ## Security disclaimer
 
 This service exists to run arbitrary, untrusted code — treat every
 deployment decision accordingly.
 
-In its full hardened configuration — MicroVM mode (`kvmEnabled: true`, so
+In its default full hardened configuration — MicroVM mode (`kvmEnabled: true`, so
 sandboxed code runs under a separate guest kernel) with NsJail inside the
-guest, seccomp filtering, the egress gateway in front of all
-sandbox-originated traffic, network policies applied, signed execution
-manifests, and `hardenedSandboxMode` left on — it is reasonably secure and
-designed with defense in depth. NsJail-only mode shares the host kernel and
-provides meaningfully weaker isolation: it is appropriate for local
-development, not for executing untrusted code from people you don't trust.
+guest, networking disabled, seccomp filtering, network policies applied, signed
+execution manifests, and `hardenedSandboxMode` left on — it is reasonably secure
+and designed with defense in depth. Enabling unrestricted networking intentionally
+removes the network-isolation layer. NsJail-only mode shares the host kernel and
+provides meaningfully weaker isolation: it is appropriate for local development,
+not for executing untrusted code from people you don't trust.
 
 No software is 100% secure. Sandbox escapes, kernel vulnerabilities, and
 misconfiguration are all real risks for any code-execution system. Keep the

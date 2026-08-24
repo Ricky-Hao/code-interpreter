@@ -55,33 +55,33 @@ const sharedSyscallDefines = [
 
 const syscallDefines = process.arch === 'arm64'
   ? [
-      ...sharedSyscallDefines,
-      '#define umount2 39',
-      '#define seccomp 277',
-      '#define kexec_file_load 294',
-      '#define setns 268',
-      '#define syslog 116',
-      '#define settimeofday 170',
-      '#define adjtimex 171',
-      '#define clock_adjtime 266',
-      /* ioperm, iopl, modify_ldt are x86-only; lookup_dcookie was deprecated
-       * upstream and is not present on arm64 in recent kernels. */
-    ]
+    ...sharedSyscallDefines,
+    '#define umount2 39',
+    '#define seccomp 277',
+    '#define kexec_file_load 294',
+    '#define setns 268',
+    '#define syslog 116',
+    '#define settimeofday 170',
+    '#define adjtimex 171',
+    '#define clock_adjtime 266',
+    /* ioperm, iopl, modify_ldt are x86-only; lookup_dcookie was deprecated
+     * upstream and is not present on arm64 in recent kernels. */
+  ]
   : [
-      ...sharedSyscallDefines,
-      '#define umount2 166',
-      '#define seccomp 317',
-      '#define kexec_file_load 320',
-      '#define setns 308',
-      '#define syslog 103',
-      '#define settimeofday 164',
-      '#define adjtimex 159',
-      '#define clock_adjtime 305',
-      '#define ioperm 173',
-      '#define iopl 172',
-      '#define modify_ldt 154',
-      '#define lookup_dcookie 212',
-    ];
+    ...sharedSyscallDefines,
+    '#define umount2 166',
+    '#define seccomp 317',
+    '#define kexec_file_load 320',
+    '#define setns 308',
+    '#define syslog 103',
+    '#define settimeofday 164',
+    '#define adjtimex 159',
+    '#define clock_adjtime 305',
+    '#define ioperm 173',
+    '#define iopl 172',
+    '#define modify_ldt 154',
+    '#define lookup_dcookie 212',
+  ];
 
 const kexecSyscalls = '    kexec_load, kexec_file_load, bpf, perf_event_open,';
 
@@ -93,85 +93,91 @@ const archSpecificLowPrioritySyscalls = process.arch === 'arm64'
   ? ''
   : '    ioperm, iopl, modify_ldt, lookup_dcookie,';
 
-const SECCOMP_POLICY = [
-  ...syscallDefines,
-  '#define AF_INET 2',
-  '#define AF_INET6 10',
-  '#define AF_NETLINK 16',
-  '#define AF_KEY 15',
-  '#define AF_RXRPC 33',
-  '#define AF_ALG 38',
-  '#define AF_VSOCK 40',
-  '#define CLONE_NAMESPACE_FLAGS 0x7e020000',
-  '#define KVM_IOCTL_MAGIC 0xAE00',
-  'POLICY sandbox {',
-  '  KILL {',
-  '    ptrace, memfd_create, personality, userfaultfd,',
-  kexecSyscalls,
-  '    add_key, request_key, keyctl,',
-  '    mount, umount2, pivot_root,',
-  /* New mount API (Linux 5.2+) — orthogonal to mount(2) and not covered by
-   * the line above. open_tree+move_mount can replicate a bind-mount; fsopen/
-   * fsmount/fspick form the new filesystem-context flow. Block all five. */
-  '    move_mount, open_tree, fsopen, fsmount, fspick,',
-  '    swapon, swapoff, reboot,',
-  '    init_module, finit_module, delete_module,',
-  /* setns joins an existing namespace via fd. Unshare is already blocked
-   * above; setns closes the other side of that surface. */
-  '    unshare, setns, seccomp,',
-  '    process_vm_readv, process_vm_writev,',
-  '    acct, quotactl,',
-  /* Defense-in-depth batch (kernel returns EPERM/ENOSYS without caps, but
-   * an explicit KILL surfaces the intent and protects against future kernel
-   * config drift). settimeofday/adjtimex/clock_adjtime: clock manipulation.
-   * syslog: kernel ring buffer. ioperm/iopl/modify_ldt: x86 ring-0-adjacent
-   * surfaces. lookup_dcookie: profiling, deprecated upstream. */
-  '    settimeofday, adjtimex, clock_adjtime, syslog,',
-  archSpecificLowPrioritySyscalls,
-  /* AF_VSOCK reaches the host hypervisor on KVM-based runners (the runner
-   * launcher uses krun -> libkrun; the guest sees virtio-vsock). Audit
-   * showed a VSOCK socket() succeeded and connect() hung instead of
-   * returning ENETUNREACH. KILL it explicitly so synthetic coverage sees
-   * SIGSYS rather than an ordinary EPERM-style denial. */
-  '    socket(domain) { domain == AF_VSOCK },',
-  '    ioctl(fd, request) { (request & 0xFF00) == KVM_IOCTL_MAGIC }',
-  '  },',
-  '  ERRNO(38) {',
-  '    clone3',
-  '  },',
-  '  ERRNO(1) {',
-  '    io_uring_setup, io_uring_enter, io_uring_register, sched_setaffinity, vmsplice,',
-  '    clone(flags) { (flags & CLONE_NAMESPACE_FLAGS) != 0 },',
-  /* Block signals to PID 1 of the sandbox PID namespace (the NsJail
-   * monitor). With clone_newpid the user can't reach other tenants — but
-   * killing their own ns's PID 1 still races NsJail's cleanup ordering and
-   * the supervisor shouldn't be reachable from inside the sandbox. Also
-   * blocks process-group (pid==0) and "everything signalable" (pid==-1)
-   * forms which would catch the monitor in their fan-out. ERRNO(1) (EPERM)
-   * matches the kernel's standard "you may not signal init" behavior so
-   * runtimes that probe with kill(pid, 0) get a familiar error instead
-   * of a SIGSYS-killed process. */
-  '    kill(pid) { pid == 0 || pid == 1 || pid == 0xFFFFFFFF },',
-  '    tkill(tid) { tid == 1 },',
-  '    tgkill(tgid, tid) { tgid == 1 || tid == 1 },',
-  '    rt_sigqueueinfo(pid) { pid == 0 || pid == 1 || pid == 0xFFFFFFFF },',
-  '    rt_tgsigqueueinfo(tgid, tid) { tgid == 1 || tid == 1 },',
-  /* pidfd_open(pid==1) would hand out a pidfd to the monitor; block at
-   * acquisition. pidfd_send_signal targets a pidfd (not a numeric pid)
-   * so we can't filter by destination — but a pidfd to PID 1 can also be
-   * obtained via openat("/proc/1", O_RDONLY) since Linux 5.4, so refuse
-   * the syscall outright. Neither call is used by Python/Node/Bun
-   * runtimes the sandbox supports. */
-  '    pidfd_open(pid) { pid == 1 },',
-  '    pidfd_send_signal,',
-  /* Block direct network and kernel-control socket domains from sandboxed
-   * code. AF_ALG covers the Linux kernel crypto API used by Copy Fail, and
-   * AF_RXRPC covers the RxRPC family used by Dirty Frag. */
-  '    socket(domain) { domain == AF_INET || domain == AF_INET6 || domain == AF_NETLINK || domain == AF_KEY || domain == AF_RXRPC || domain == AF_ALG }',
-  '  }',
-  '}',
-  'USE sandbox DEFAULT ALLOW',
-].filter(line => line !== '').join('\n');
+function buildSeccompPolicy(): string {
+  const internetSocketFamilies = config.disable_networking
+    ? 'domain == AF_INET || domain == AF_INET6 || '
+    : '';
+
+  return [
+    ...syscallDefines,
+    '#define AF_INET 2',
+    '#define AF_INET6 10',
+    '#define AF_NETLINK 16',
+    '#define AF_KEY 15',
+    '#define AF_RXRPC 33',
+    '#define AF_ALG 38',
+    '#define AF_VSOCK 40',
+    '#define CLONE_NAMESPACE_FLAGS 0x7e020000',
+    '#define KVM_IOCTL_MAGIC 0xAE00',
+    'POLICY sandbox {',
+    '  KILL {',
+    '    ptrace, memfd_create, personality, userfaultfd,',
+    kexecSyscalls,
+    '    add_key, request_key, keyctl,',
+    '    mount, umount2, pivot_root,',
+    /* New mount API (Linux 5.2+) — orthogonal to mount(2) and not covered by
+     * the line above. open_tree+move_mount can replicate a bind-mount; fsopen/
+     * fsmount/fspick form the new filesystem-context flow. Block all five. */
+    '    move_mount, open_tree, fsopen, fsmount, fspick,',
+    '    swapon, swapoff, reboot,',
+    '    init_module, finit_module, delete_module,',
+    /* setns joins an existing namespace via fd. Unshare is already blocked
+     * above; setns closes the other side of that surface. */
+    '    unshare, setns, seccomp,',
+    '    process_vm_readv, process_vm_writev,',
+    '    acct, quotactl,',
+    /* Defense-in-depth batch (kernel returns EPERM/ENOSYS without caps, but
+     * an explicit KILL surfaces the intent and protects against future kernel
+     * config drift). settimeofday/adjtimex/clock_adjtime: clock manipulation.
+     * syslog: kernel ring buffer. ioperm/iopl/modify_ldt: x86 ring-0-adjacent
+     * surfaces. lookup_dcookie: profiling, deprecated upstream. */
+    '    settimeofday, adjtimex, clock_adjtime, syslog,',
+    archSpecificLowPrioritySyscalls,
+    /* AF_VSOCK reaches the host hypervisor on KVM-based runners (the runner
+     * launcher uses krun -> libkrun; the guest sees virtio-vsock). Audit
+     * showed a VSOCK socket() succeeded and connect() hung instead of
+     * returning ENETUNREACH. KILL it explicitly so synthetic coverage sees
+     * SIGSYS rather than an ordinary EPERM-style denial. */
+    '    socket(domain) { domain == AF_VSOCK },',
+    '    ioctl(fd, request) { (request & 0xFF00) == KVM_IOCTL_MAGIC }',
+    '  },',
+    '  ERRNO(38) {',
+    '    clone3',
+    '  },',
+    '  ERRNO(1) {',
+    '    io_uring_setup, io_uring_enter, io_uring_register, sched_setaffinity, vmsplice,',
+    '    clone(flags) { (flags & CLONE_NAMESPACE_FLAGS) != 0 },',
+    /* Block signals to PID 1 of the sandbox PID namespace (the NsJail
+     * monitor). With clone_newpid the user can't reach other tenants — but
+     * killing their own ns's PID 1 still races NsJail's cleanup ordering and
+     * the supervisor shouldn't be reachable from inside the sandbox. Also
+     * blocks process-group (pid==0) and "everything signalable" (pid==-1)
+     * forms which would catch the monitor in their fan-out. ERRNO(1) (EPERM)
+     * matches the kernel's standard "you may not signal init" behavior so
+     * runtimes that probe with kill(pid, 0) get a familiar error instead
+     * of a SIGSYS-killed process. */
+    '    kill(pid) { pid == 0 || pid == 1 || pid == 0xFFFFFFFF },',
+    '    tkill(tid) { tid == 1 },',
+    '    tgkill(tgid, tid) { tgid == 1 || tid == 1 },',
+    '    rt_sigqueueinfo(pid) { pid == 0 || pid == 1 || pid == 0xFFFFFFFF },',
+    '    rt_tgsigqueueinfo(tgid, tid) { tgid == 1 || tid == 1 },',
+    /* pidfd_open(pid==1) would hand out a pidfd to the monitor; block at
+     * acquisition. pidfd_send_signal targets a pidfd (not a numeric pid)
+     * so we can't filter by destination — but a pidfd to PID 1 can also be
+     * obtained via openat("/proc/1", O_RDONLY) since Linux 5.4, so refuse
+     * the syscall outright. Neither call is used by Python/Node/Bun
+     * runtimes the sandbox supports. */
+    '    pidfd_open(pid) { pid == 1 },',
+    '    pidfd_send_signal,',
+    /* Ordinary Internet sockets remain blocked in isolated mode. Kernel-control
+     * families stay blocked in both modes: AF_ALG covers the kernel crypto API
+     * used by Copy Fail, and AF_RXRPC covers the family used by Dirty Frag. */
+    `    socket(domain) { ${internetSocketFamilies}domain == AF_NETLINK || domain == AF_KEY || domain == AF_RXRPC || domain == AF_ALG }`,
+    '  }',
+    '}',
+    'USE sandbox DEFAULT ALLOW',
+  ].filter(line => line !== '').join('\n');
+}
 
 export { SIGNALS };
 
@@ -412,8 +418,8 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
       child.on('close', () => childDiedSignal.abort());
       stdoutDrain = drainStream(child, child.stdout, 'stdout');
       stderrDrain = drainStream(child, child.stderr, 'stderr');
-      void stdoutDrain.catch(() => {});
-      void stderrDrain.catch(() => {});
+      void stdoutDrain.catch(() => { });
+      void stderrDrain.catch(() => { });
       /* Attach a stdin 'error' handler before the setup gate can wait. If
        * nsjail exits before the caller writes stdin, the stream may emit
        * EPIPE while the gate is still polling. */
@@ -659,7 +665,7 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
   const args: string[] = [
     '--config', cfgPath ?? config.nsjail_config,
     '--log', logPath,
-    '--seccomp_string', SECCOMP_POLICY,
+    '--seccomp_string', buildSeccompPolicy(),
     '--user', `${SANDBOX_INSIDE_UID}:${identity.uid}:1`,
     '--group', `${SANDBOX_INSIDE_GID}:${identity.gid}:1`,
     '-s', '/usr/bin:/bin',
@@ -670,6 +676,11 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
 
   if (config.use_cgroupv2) {
     args.push('--use_cgroupv2');
+  }
+
+  if (!config.disable_networking) {
+    args.push('--disable_clone_newnet');
+    args.push('-R', '/tmp/codeapi-resolv.conf:/etc/resolv.conf');
   }
 
   if (extraPkgdirs) {

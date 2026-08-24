@@ -3,7 +3,8 @@ Network Policies for CodeAPI.
 
 The important boundary is sandbox-runner:
   - service-worker may call sandbox-runner.
-  - sandbox-runner may call only egress-gateway (plus DNS if required).
+  - network-disabled sandbox-runner may call only egress-gateway and DNS.
+  - network-enabled sandbox-runner has unrestricted egress for executed code.
   - egress-gateway delegates only to file-server and tool-call-server.
 */}}
 {{- if .Values.networkPolicy.enabled }}
@@ -71,6 +72,9 @@ spec:
         - protocol: TCP
           port: {{ .Values.workerSandbox.sandbox.port }}
   egress:
+{{- if not .Values.workerSandbox.sandbox.disableNetworking }}
+    - {}
+{{- else }}
     - to:
         - namespaceSelector: {}
           podSelector:
@@ -89,6 +93,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.egressGateway.service.port }}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
