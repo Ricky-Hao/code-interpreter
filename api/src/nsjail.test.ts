@@ -33,6 +33,34 @@ function seccompPolicy(): string {
 }
 
 describe('NsJail args', () => {
+  test('shares networking and mounts the resolver only when networking is enabled', () => {
+    const originalDisableNetworking = config.disable_networking;
+    const options = {
+      logPath: '/tmp/nsjail-test.log',
+      pkgdir: '/pkgs/python/3.14.4',
+      timeout: 1000,
+      memoryLimit: -1,
+      envVars: {},
+      command: ['/bin/bash', '/pkgs/python/3.14.4/run', 'main.py'],
+      identity: { slot: 0, uid: 65534, gid: 65534, perJobUid: false },
+    };
+    const resolverMount = '/tmp/codeapi-resolv.conf:/etc/resolv.conf';
+
+    try {
+      config.disable_networking = true;
+      const disabledArgs = buildArgs(options);
+      expect(disabledArgs).not.toContain('--disable_clone_newnet');
+      expect(hasArgPair(disabledArgs, '-R', resolverMount)).toBe(false);
+
+      config.disable_networking = false;
+      const enabledArgs = buildArgs(options);
+      expect(enabledArgs).toContain('--disable_clone_newnet');
+      expect(hasArgPair(enabledArgs, '-R', resolverMount)).toBe(true);
+    } finally {
+      config.disable_networking = originalDisableNetworking;
+    }
+  });
+
   test('passes dynamic per-job UID/GID mappings', () => {
     const args = buildArgs({
       logPath: '/tmp/nsjail-test.log',
@@ -408,12 +436,34 @@ describe('NsJail seccomp policy', () => {
     expect(policy).toContain('USE sandbox DEFAULT ALLOW');
   });
 
-  test('rejects Copy Fail and Dirty Frag socket entry points in the sandbox', () => {
+  test('rejects kernel-control socket entry points in the sandbox', () => {
     const policy = seccompPolicy();
     const errnoBlock = policy.split('ERRNO(1)')[1] ?? '';
     const socketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain)'));
     expect(socketRule).toBeDefined();
     expect(socketRule).toContain('domain != AF_VSOCK');
+  });
+
+  test('allows Internet socket families only when networking is enabled', () => {
+    const originalDisableNetworking = config.disable_networking;
+    const socketRule = () => {
+      const errnoBlock = seccompPolicy().split('ERRNO(1)')[1] ?? '';
+      return errnoBlock.split('\n').find(line => line.includes('socket(domain)')) ?? '';
+    };
+
+    try {
+      config.disable_networking = true;
+      expect(socketRule()).toBe('    socket(domain) { domain != AF_VSOCK },');
+
+      config.disable_networking = false;
+      expect(socketRule()).toBe('    socket(domain) { domain != AF_VSOCK && domain != AF_INET && domain != AF_INET6 },');
+      const policy = seccompPolicy();
+      expect(policy).toContain('    socketpair');
+      expect(policy).toContain('    sendmsg, sendmmsg,');
+      expect(policy).toContain('    io_uring_setup, io_uring_enter, io_uring_register,');
+    } finally {
+      config.disable_networking = originalDisableNetworking;
+    }
   });
 
   test('KILLs the defense-in-depth batch from the audit', () => {

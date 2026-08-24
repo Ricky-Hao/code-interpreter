@@ -304,6 +304,32 @@ describe('resolveOutputBucketSessionKey', () => {
 });
 
 describe('authorizeRequestedFiles', () => {
+  test('deduplicates aliases for the same authorized storage object', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    const store = ownedStore(sessionKey);
+
+    await expect(authorizeRequestedFiles({
+      req,
+      files: [validFile(), validFile({ name: 'inputs/alias.csv' })],
+      store,
+    })).resolves.toEqual([validFile()]);
+  });
+
+  test('preserves distinct storage objects that share a destination', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    const secondFile = validFile({ id: 'file_abcdefghijklmnop' });
+    const store = ownedStore(sessionKey);
+    store.set(`upload:${sessionKey}${secondFile.storage_session_id}${secondFile.id}`, 'true');
+
+    await expect(authorizeRequestedFiles({
+      req,
+      files: [validFile(), secondFile],
+      store,
+    })).resolves.toEqual([validFile(), secondFile]);
+  });
+
   test('allows files owned by the resolved user sessionKey', async () => {
     const req = request({ tenantId: TENANT_ID, userId: USER_ID });
     const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });

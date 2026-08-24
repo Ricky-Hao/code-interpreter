@@ -110,7 +110,8 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
-RUN chmod +x ./entrypoint.sh
+COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
+RUN chmod +x ./entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh
 
 # ============================================================================
 # Stage 2: Build the launcher binary on Fedora (libkrun is packaged there)
@@ -157,6 +158,7 @@ RUN mkdir -p /host-packages
 COPY launcher/entrypoint.sh /usr/local/bin/launcher-entrypoint.sh
 COPY docker/start-direct-sandbox.sh /usr/local/bin/start-direct-sandbox.sh
 COPY docker/sandbox-entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /sandbox-rootfs-setup /usr/local/bin/launcher-entrypoint.sh /usr/local/bin/start-direct-sandbox.sh /usr/local/bin/entrypoint.sh
+COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
+RUN chmod +x /sandbox-rootfs-setup /usr/local/bin/launcher-entrypoint.sh /usr/local/bin/start-direct-sandbox.sh /usr/local/bin/entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

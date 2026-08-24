@@ -1,0 +1,342 @@
+name: Build Code Interpreter images
+
+on:
+  pull_request:
+    paths:
+      - .dockerignore
+      - .github/workflows/build-images.yml
+      - api/**
+      - docker/**
+      - launcher/**
+      - scripts/**
+      - service/**
+      - shared/**
+      - tests/**
+      - build-packages.sh
+      - javascript-packages.txt
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+  push:
+    branches: [main]
+    paths:
+      - .dockerignore
+      - .github/workflows/build-images.yml
+      - api/**
+      - docker/**
+      - launcher/**
+      - scripts/**
+      - service/**
+      - shared/**
+      - tests/**
+      - build-packages.sh
+      - javascript-packages.txt
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-interpreter-images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  launcher-tests:
+    name: Test launcher source
+    runs-on: ubuntu-24.04
+    container: fedora:43
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y rust cargo libkrun-devel gcc git
+
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Run launcher tests
+        working-directory: launcher
+        run: cargo test
+
+  runtime-network-tests:
+    name: Runtime network tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Test resolver handoff
+        run: tests/runtime_resolver_handoff.sh
+
+      - name: Test sandbox NetworkPolicy modes
+        run: tests/network_policy_networking.sh
+
+  source-tests:
+    name: Test ${{ matrix.workspace }} source
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace:
+          - api
+          - service
+    defaults:
+      run:
+        working-directory: ${{ matrix.workspace }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Cache Bun packages
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-images-${{ matrix.workspace }}-bun-1.3.14-${{ hashFiles(format('{0}/bun.lock', matrix.workspace)) }}
+          restore-keys: |
+            ${{ runner.os }}-images-${{ matrix.workspace }}-bun-1.3.14-
+
+      - name: Install dependencies
+        run: bun ci
+
+      - name: Build source
+        run: bun run build
+
+      - name: Run tests
+        run: bun run test
+
+  dockerfile-checks:
+    name: Validate ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: codeapi-api
+            dockerfile: service/Dockerfile.api
+            target: production
+          - image: codeapi-worker
+            dockerfile: service/Dockerfile.worker
+            target: production
+          - image: codeapi-file-server
+            dockerfile: service/Dockerfile
+            target: production
+          - image: codeapi-egress-gateway
+            dockerfile: service/Dockerfile.egress-gateway
+            target: production
+          - image: codeapi-tool-call-server
+            dockerfile: service/Dockerfile.tool-call-server
+            target: production
+          - image: codeapi-sandbox-runner
+            dockerfile: api/Dockerfile
+            target: sandbox-runner-baked
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Validate Docker target
+        run: >-
+          docker buildx build
+          --check
+          --platform linux/amd64
+          --target "${{ matrix.target }}"
+          --file "${{ matrix.dockerfile }}"
+          .
+
+  build-services:
+    name: Build ${{ matrix.image }}
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs:
+      - dockerfile-checks
+      - launcher-tests
+      - runtime-network-tests
+      - source-tests
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: codeapi-api
+            dockerfile: service/Dockerfile.api
+            target: production
+          - image: codeapi-worker
+            dockerfile: service/Dockerfile.worker
+            target: production
+          - image: codeapi-file-server
+            dockerfile: service/Dockerfile
+            target: production
+          - image: codeapi-egress-gateway
+            dockerfile: service/Dockerfile.egress-gateway
+            target: production
+          - image: codeapi-tool-call-server
+            dockerfile: service/Dockerfile.tool-call-server
+            target: production
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image tags
+        id: image
+        env:
+          IMAGE: ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_name="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE}"
+          short_sha="${GITHUB_SHA:0:12}"
+          {
+            echo "name=${image_name}"
+            echo "tags<<TAGS"
+            echo "${image_name}:sha-${GITHUB_SHA}"
+            echo "${image_name}:sha-${short_sha}"
+            echo "TAGS"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Build and publish image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=min
+          provenance: mode=max
+          sbom: true
+
+      - name: Record deployable digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          {
+            echo "### ${IMAGE_NAME}"
+            echo '```text'
+            echo "${IMAGE_NAME}@${DIGEST}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  build-sandbox:
+    name: Build baked sandbox runner
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs:
+      - dockerfile-checks
+      - launcher-tests
+      - runtime-network-tests
+      - source-tests
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet /opt/ghc
+          docker system prune --all --force
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image tags
+        id: image
+        env:
+          IMAGE: codeapi-sandbox-runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_name="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE}"
+          short_sha="${GITHUB_SHA:0:12}"
+          {
+            echo "name=${image_name}"
+            echo "tags<<TAGS"
+            echo "${image_name}:sha-${GITHUB_SHA}"
+            echo "${image_name}:sha-${short_sha}"
+            echo "TAGS"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Build and publish baked runner
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: api/Dockerfile
+          target: sandbox-runner-baked
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=min
+          provenance: mode=max
+          sbom: true
+
+      - name: Record deployable digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          {
+            echo "### ${IMAGE_NAME}"
+            echo '```text'
+            echo "${IMAGE_NAME}@${DIGEST}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"

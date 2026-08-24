@@ -56,33 +56,33 @@ const sharedSyscallDefines = [
 
 const syscallDefines = process.arch === 'arm64'
   ? [
-      ...sharedSyscallDefines,
-      '#define umount2 39',
-      '#define seccomp 277',
-      '#define kexec_file_load 294',
-      '#define setns 268',
-      '#define syslog 116',
-      '#define settimeofday 170',
-      '#define adjtimex 171',
-      '#define clock_adjtime 266',
-      /* ioperm, iopl, modify_ldt are x86-only; lookup_dcookie was deprecated
-       * upstream and is not present on arm64 in recent kernels. */
-    ]
+    ...sharedSyscallDefines,
+    '#define umount2 39',
+    '#define seccomp 277',
+    '#define kexec_file_load 294',
+    '#define setns 268',
+    '#define syslog 116',
+    '#define settimeofday 170',
+    '#define adjtimex 171',
+    '#define clock_adjtime 266',
+    /* ioperm, iopl, modify_ldt are x86-only; lookup_dcookie was deprecated
+     * upstream and is not present on arm64 in recent kernels. */
+  ]
   : [
-      ...sharedSyscallDefines,
-      '#define umount2 166',
-      '#define seccomp 317',
-      '#define kexec_file_load 320',
-      '#define setns 308',
-      '#define syslog 103',
-      '#define settimeofday 164',
-      '#define adjtimex 159',
-      '#define clock_adjtime 305',
-      '#define ioperm 173',
-      '#define iopl 172',
-      '#define modify_ldt 154',
-      '#define lookup_dcookie 212',
-    ];
+    ...sharedSyscallDefines,
+    '#define umount2 166',
+    '#define seccomp 317',
+    '#define kexec_file_load 320',
+    '#define setns 308',
+    '#define syslog 103',
+    '#define settimeofday 164',
+    '#define adjtimex 159',
+    '#define clock_adjtime 305',
+    '#define ioperm 173',
+    '#define iopl 172',
+    '#define modify_ldt 154',
+    '#define lookup_dcookie 212',
+  ];
 
 const kexecSyscalls = '    kexec_load, kexec_file_load, bpf, perf_event_open,';
 
@@ -94,7 +94,11 @@ const archSpecificLowPrioritySyscalls = process.arch === 'arm64'
   ? ''
   : '    ioperm, iopl, modify_ldt, lookup_dcookie,';
 
-const SECCOMP_POLICY = [
+function buildSeccompPolicy(): string {
+const deniedSocketFamilies = config.disable_networking
+  ? 'domain != AF_VSOCK'
+  : 'domain != AF_VSOCK && domain != AF_INET && domain != AF_INET6';
+return [
   ...syscallDefines,
   '#define AF_INET 2',
   '#define AF_INET6 10',
@@ -183,15 +187,17 @@ const SECCOMP_POLICY = [
    * runtimes the sandbox supports. */
   '    pidfd_open(pid) { pid == 1 },',
   '    pidfd_send_signal,',
-  /* Deny every socket() family. VSOCK keeps its stronger KILL action above.
+  /* Deny every socket() family except opt-in Internet networking.
+   * VSOCK keeps its stronger KILL action above.
    * Deny socketpairs as well; packaged runtime IPC uses anonymous pipes.
    * Keep sendmsg/sendmmsg denied for inherited descriptors too. */
-  '    socket(domain) { domain != AF_VSOCK },',
+  `    socket(domain) { ${deniedSocketFamilies} },`,
   '    socketpair',
   '  }',
   '}',
   'USE sandbox DEFAULT ALLOW',
 ].filter(line => line !== '').join('\n');
+}
 
 export { SIGNALS };
 
@@ -441,8 +447,8 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
       child.on('close', () => childDiedSignal.abort());
       stdoutDrain = drainStream(child, child.stdout, 'stdout');
       stderrDrain = drainStream(child, child.stderr, 'stderr');
-      void stdoutDrain.catch(() => {});
-      void stderrDrain.catch(() => {});
+      void stdoutDrain.catch(() => { });
+      void stderrDrain.catch(() => { });
       /* Attach a stdin 'error' handler before the setup gate can wait. If
        * nsjail exits before the caller writes stdin, the stream may emit
        * EPIPE while the gate is still polling. */
@@ -688,7 +694,7 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
   const args: string[] = [
     '--config', cfgPath ?? config.nsjail_config,
     '--log', logPath,
-    '--seccomp_string', SECCOMP_POLICY,
+    '--seccomp_string', buildSeccompPolicy(),
     '--user', `${SANDBOX_INSIDE_UID}:${identity.uid}:1`,
     '--group', `${SANDBOX_INSIDE_GID}:${identity.gid}:1`,
     '-s', '/usr/bin:/bin',
@@ -699,6 +705,11 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
 
   if (config.use_cgroupv2) {
     args.push('--use_cgroupv2');
+  }
+
+  if (!config.disable_networking) {
+    args.push('--disable_clone_newnet');
+    args.push('-R', '/tmp/codeapi-resolv.conf:/etc/resolv.conf');
   }
 
   if (extraPkgdirs) {
