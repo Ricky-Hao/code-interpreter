@@ -201,6 +201,8 @@ return [
 
 export { SIGNALS };
 
+export const SANDBOX_DEPENDENCY_MOUNT = '/mnt/deps';
+
 /* Base sandbox.cfg cached at module load. Per-job runs append a dynamic
  * /mnt/data mount block (see renderJobConfigOverlay) so the bind can carry
  * noexec/nosuid/nodev — flags NsJail's CLI -B form does not accept. */
@@ -219,8 +221,9 @@ function readBaseConfig(): string {
  * embedded backslashes and double-quotes defensively in case future
  * callers pass arbitrary paths in. The cfg syntax is C-like so only those
  * two characters need escaping inside a string literal. */
-export function renderJobConfigOverlay(submissionDir: string): string {
+export function renderJobConfigOverlay(submissionDir: string, dependencyDir: string): string {
   const escaped = submissionDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escapedDependencyDir = dependencyDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   return [
     '',
     '# Per-job submission workspace bind. Dynamic because the source path',
@@ -237,6 +240,18 @@ export function renderJobConfigOverlay(submissionDir: string): string {
     '    nodev: true',
     '}',
     '',
+    '# Per-job dependency layer. Unlike /mnt/data this mount permits execution',
+    '# so package-provided binaries and native wheels can run, while nosuid and',
+    '# nodev keep privilege-bearing files and device nodes inert.',
+    'mount {',
+    `    src: "${escapedDependencyDir}"`,
+    `    dst: "${SANDBOX_DEPENDENCY_MOUNT}"`,
+    '    is_bind: true',
+    '    rw: true',
+    '    nosuid: true',
+    '    nodev: true',
+    '}',
+    '',
   ].join('\n');
 }
 
@@ -244,6 +259,7 @@ interface ExecuteOptions {
   command: string[];
   envVars: Record<string, string>;
   submissionDir: string;
+  dependencyDir: string;
   pkgdir: string;
   timeout: number;
   memoryLimit: number;
@@ -260,6 +276,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     command,
     envVars,
     submissionDir,
+    dependencyDir,
     pkgdir,
     timeout,
     memoryLimit,
@@ -274,7 +291,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   const logPath = `/tmp/nsjail-${logId}.log`;
   const cfgPath = `/tmp/nsjail-${logId}.cfg`;
 
-  fs.writeFileSync(cfgPath, readBaseConfig() + renderJobConfigOverlay(submissionDir), { mode: 0o600 });
+  fs.writeFileSync(cfgPath, readBaseConfig() + renderJobConfigOverlay(submissionDir, dependencyDir), { mode: 0o600 });
 
   const nsjailArgs = buildArgs({
     logPath,

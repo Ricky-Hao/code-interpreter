@@ -170,7 +170,8 @@ COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
 COPY api/src/hosted-app-launcher.sh /usr/local/bin/codeapi-hosted-app-launcher
 COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
-RUN chmod +x ./entrypoint.sh /usr/local/bin/codeapi-hosted-app-launcher /usr/local/libexec/codeapi-runtime-resolver.sh
+COPY docker/sandbox-pkg /usr/local/bin/sandbox-pkg
+RUN chmod +x ./entrypoint.sh /usr/local/bin/codeapi-hosted-app-launcher /usr/local/libexec/codeapi-runtime-resolver.sh /usr/local/bin/sandbox-pkg
 
 # ============================================================================
 # Stage 2b: AWS Lambda MicroVM container base image

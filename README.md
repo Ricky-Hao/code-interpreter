@@ -27,6 +27,13 @@ digest; the workflow intentionally does not publish mutable `latest` tags.
 - **Remote Code Bridge** - Lets an operator-owned VM connect outbound and serve
   as a fenced, stateful sandbox through the `@librechat/code` worker
 
+Jobs can also install missing Python or JavaScript dependencies into an
+isolated, executable `/mnt/deps` layer with `sandbox-pkg pip|uv|npm|bun`. This
+layer is unprivileged and temporary to one execution; it does not make the
+read-only guest OS or baked package tree mutable. Remote registry installs
+require sandbox networking and run third-party package install code with the
+sandbox's network reachability.
+
 ## Architecture
 
 1. LibreChat sends a code execution request to the **API**
