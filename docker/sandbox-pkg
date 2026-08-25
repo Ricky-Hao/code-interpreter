@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: sandbox-pkg <pip|uv|npm|bun> PACKAGE...
+
+Installs dependencies into the writable per-execution /mnt/deps layer.
+System packages are not supported; the Debian guest and /pkgs stay read-only.
+EOF
+    exit 2
+}
+
+manager="${1:-}"
+if [ -z "$manager" ]; then
+    usage
+fi
+shift
+if [ "$#" -eq 0 ]; then
+    usage
+fi
+
+deps_root="${SANDBOX_DEPS_ROOT:-/mnt/deps}"
+case "$deps_root" in
+    /*) ;;
+    *) echo "sandbox-pkg: SANDBOX_DEPS_ROOT must be absolute" >&2; exit 2 ;;
+esac
+data_root="${SANDBOX_DATA_ROOT:-/mnt/data}"
+case "$data_root" in
+    /*) ;;
+    *) echo "sandbox-pkg: SANDBOX_DATA_ROOT must be absolute" >&2; exit 2 ;;
+esac
+
+mkdir -p \
+    "$deps_root/.cache" \
+    "$deps_root/bin" \
+    "$deps_root/tmp"
+
+if [ ! -w "$deps_root" ]; then
+    echo "sandbox-pkg: dependency layer is not writable: $deps_root" >&2
+    exit 1
+fi
+
+prepare_js_root() {
+    mkdir -p "$deps_root/js/node_modules" "$deps_root/.cache/npm"
+    if [ ! -f "$deps_root/js/package.json" ]; then
+        printf '{"private":true}\n' > "$deps_root/js/package.json"
+    fi
+}
+
+link_missing_module() {
+    local source="$1"
+    local destination="$2"
+    if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+        ln -s "$source" "$destination"
+    fi
+}
+
+seed_baked_node_modules() {
+    local destination="$deps_root/js/node_modules"
+    local module_path entry scope_entry name
+    local module_paths=()
+    local old_ifs="$IFS"
+    IFS=':' read -r -a module_paths <<< "${NODE_PATH:-}"
+    IFS="$old_ifs"
+
+    for module_path in "${module_paths[@]}"; do
+        [ -n "$module_path" ] || continue
+        [ "$module_path" != "$destination" ] || continue
+        [ -d "$module_path" ] || continue
+        for entry in "$module_path"/*; do
+            [ -e "$entry" ] || [ -L "$entry" ] || continue
+            name="${entry##*/}"
+            if [[ "$name" == @* ]] && [ -d "$entry" ] && [ ! -L "$entry" ]; then
+                if [ -L "$destination/$name" ]; then
+                    continue
+                fi
+                mkdir -p "$destination/$name"
+                for scope_entry in "$entry"/*; do
+                    [ -e "$scope_entry" ] || [ -L "$scope_entry" ] || continue
+                    link_missing_module "$scope_entry" "$destination/$name/${scope_entry##*/}"
+                done
+            else
+                link_missing_module "$entry" "$destination/$name"
+            fi
+        done
+        if [ -d "$module_path/.bin" ]; then
+            [ ! -L "$destination/.bin" ] || continue
+            mkdir -p "$destination/.bin"
+            for entry in "$module_path/.bin"/*; do
+                [ -e "$entry" ] || [ -L "$entry" ] || continue
+                link_missing_module "$entry" "$destination/.bin/${entry##*/}"
+            done
+        fi
+    done
+}
+
+activate_js_modules() {
+    local link_path="$data_root/node_modules"
+    if [ -L "$link_path" ]; then
+        rm -f "$link_path"
+    elif [ -e "$link_path" ]; then
+        echo "sandbox-pkg: $link_path already exists and is not a symlink" >&2
+        return 1
+    fi
+    ln -s "$deps_root/js/node_modules" "$link_path"
+}
+
+case "$manager" in
+    pip|python)
+        command -v python3 >/dev/null 2>&1 || {
+            echo "sandbox-pkg: python3 is unavailable in this runtime" >&2
+            exit 1
+        }
+        mkdir -p "$deps_root/python" "$deps_root/.cache/pip"
+        exec python3 -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --upgrade \
+            --target "$deps_root/python" \
+            --cache-dir "$deps_root/.cache/pip" \
+            "$@"
+        ;;
+    uv)
+        command -v uv >/dev/null 2>&1 || {
+            echo "sandbox-pkg: uv is unavailable in this runtime" >&2
+            exit 1
+        }
+        mkdir -p "$deps_root/python" "$deps_root/.cache/uv"
+        exec uv pip install \
+            --upgrade \
+            --target "$deps_root/python" \
+            --cache-dir "$deps_root/.cache/uv" \
+            "$@"
+        ;;
+    npm)
+        command -v npm >/dev/null 2>&1 || {
+            echo "sandbox-pkg: npm is unavailable in this runtime" >&2
+            exit 1
+        }
+        prepare_js_root
+        npm install \
+            --prefix "$deps_root/js" \
+            --cache "$deps_root/.cache/npm" \
+            --no-audit \
+            --no-fund \
+            "$@"
+        seed_baked_node_modules
+        activate_js_modules
+        ;;
+    bun)
+        command -v bun >/dev/null 2>&1 || {
+            echo "sandbox-pkg: bun is unavailable in this runtime" >&2
+            exit 1
+        }
+        prepare_js_root
+        mkdir -p "$deps_root/.cache/bun"
+        cd "$deps_root/js"
+        bun add "$@"
+        seed_baked_node_modules
+        activate_js_modules
+        ;;
+    *)
+        echo "sandbox-pkg: unsupported manager: $manager" >&2
+        usage
+        ;;
+esac

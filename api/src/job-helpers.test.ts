@@ -8,10 +8,12 @@ import {
   markerConflictsWithExplicitFile,
   aggregateBashExtras,
   ensureNodeModulesSymlink,
+  filterExtraEnvVars,
   isHiddenDirectory,
   inputsLiveUnder,
   mapWithConcurrency,
   mimeTypeFor,
+  sandboxDependencyEnv,
 } from './job';
 import type { Runtime } from './runtime';
 import type { TFile } from './job';
@@ -40,6 +42,61 @@ function makeRuntime(overrides: Partial<Runtime> & { language: string; pkgdir: s
     ...overrides,
   };
 }
+
+describe('sandboxDependencyEnv', () => {
+  it('prepends writable dependency locations while preserving runtime paths', () => {
+    const env = sandboxDependencyEnv({
+      PATH: '/pkgs/python/3.14.4/bin:/usr/bin:/bin',
+      PYTHONPATH: '/runtime/python',
+      NODE_PATH: '/runtime/node_modules',
+    });
+
+    expect(env.SANDBOX_DEPS_ROOT).toBe('/mnt/deps');
+    expect(env.SANDBOX_DATA_ROOT).toBe('/mnt/data');
+    expect(env.PIP_TARGET).toBe('/mnt/deps/python');
+    expect(env.TMPDIR).toBe('/mnt/deps/tmp');
+    expect(env.PATH.startsWith('/mnt/deps/bin:/mnt/deps/python/bin:')).toBe(true);
+    expect(env.PATH.endsWith('/pkgs/python/3.14.4/bin:/usr/bin:/bin')).toBe(true);
+    expect(env.PYTHONPATH).toBe('/mnt/deps/python:/runtime/python');
+    expect(env.NODE_PATH).toBe(
+      '/mnt/deps/js/node_modules:/runtime/node_modules',
+    );
+  });
+
+  it('keeps dependency paths ahead of Bash runtime paths', () => {
+    const env: Record<string, string> = { PATH: '/pkg/bash/bin' };
+    const runtimes = [
+      makeRuntime({
+        language: 'node',
+        pkgdir: '/pkg/node',
+        env_vars: {
+          PATH: '/pkg/node/bin',
+          NODE_PATH: '/pkg/node/node_modules',
+        },
+      }),
+    ];
+
+    aggregateBashExtras('/pkg/bash', env, runtimes);
+    Object.assign(env, sandboxDependencyEnv(env));
+
+    expect(env.PATH).toBe(
+      '/mnt/deps/bin:/mnt/deps/python/bin:/mnt/deps/js/node_modules/.bin:/pkg/node/bin:/pkg/bash/bin',
+    );
+    expect(env.NODE_PATH).toBe(
+      '/mnt/deps/js/node_modules:/pkg/node/node_modules',
+    );
+  });
+});
+
+describe('dependency environment isolation', () => {
+  it('rejects caller overrides for sandbox dependency paths', () => {
+    expect(filterExtraEnvVars({
+      SANDBOX_DEPS_ROOT: '/mnt/data/attacker-deps',
+      SANDBOX_DATA_ROOT: '/mnt/deps/js',
+      USER_SETTING: 'allowed',
+    })).toEqual({ USER_SETTING: 'allowed' });
+  });
+});
 
 describe('resolveOriginalName', () => {
   function responseWithHeader(value?: string): Response {

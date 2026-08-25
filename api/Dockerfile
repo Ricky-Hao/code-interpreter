@@ -147,7 +147,8 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
-RUN chmod +x ./entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh
+COPY docker/sandbox-pkg /usr/local/bin/sandbox-pkg
+RUN chmod +x ./entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh /usr/local/bin/sandbox-pkg
 
 # ============================================================================
 # Stage 2b: AWS Lambda MicroVM container base image

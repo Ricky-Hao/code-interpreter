@@ -150,7 +150,8 @@ COPY --from=sandbox-builder /app/.build ./.build
 COPY api/config ./config
 COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
-RUN chmod +x ./entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh
+COPY docker/sandbox-pkg /usr/local/bin/sandbox-pkg
+RUN chmod +x ./entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh /usr/local/bin/sandbox-pkg
 
 RUN mkdir -p /pkgs /tmp/sandbox
 

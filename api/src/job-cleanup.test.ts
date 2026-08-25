@@ -17,9 +17,11 @@ import {
   type SandboxWorkspaceLease,
 } from './workspace-isolation';
 import { config } from './config';
+import { SANDBOX_DEPENDENCY_MOUNT } from './nsjail';
 
 interface CleanupInternals {
   jobIdentity?: SandboxJobIdentity;
+  dependencyWorkspaceLease?: SandboxWorkspaceLease;
 }
 
 function makeRuntime(): Runtime {
@@ -58,6 +60,67 @@ function asCleanupInternals(job: Job): CleanupInternals {
 }
 
 describe('Job cleanup', () => {
+  test('keeps dependencies outside the session tree and removes them at job cleanup', async () => {
+    const workspace = await fsp.mkdtemp(path.join(os.tmpdir(), 'prime-dependencies-'));
+    await fsp.symlink(
+      `${SANDBOX_DEPENDENCY_MOUNT}/js/node_modules`,
+      path.join(workspace, 'node_modules'),
+    );
+    const identity: SandboxJobIdentity = {
+      slot: 0,
+      uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+      gid: typeof process.getgid === 'function' ? process.getgid() : 0,
+      perJobUid: false,
+    };
+    const lease: SandboxWorkspaceLease = {
+      workspaceId: 'prime-dependencies',
+      dir: workspace,
+      identity,
+    };
+    const session = {
+      runtimeSessionId: 'rt_prime_dependencies',
+      acquire: async () => lease,
+      markDirty: () => {},
+    } as unknown as SessionWorkspace;
+    const job = new Job({
+      session_id: 'prime-dependencies',
+      runtime: makeRuntime(),
+      files: [],
+      args: [],
+      stdin: '',
+      timeouts: { compile: 5000, run: 5000 },
+      cpu_times: { compile: 5000, run: 5000 },
+      memory_limits: { compile: 100_000_000, run: 100_000_000 },
+      session,
+    });
+
+    let dependencyDir: string | undefined;
+    try {
+      await job.prime();
+      dependencyDir = asCleanupInternals(job).dependencyWorkspaceLease?.dir;
+      expect(dependencyDir).toBeDefined();
+      expect(path.relative(workspace, dependencyDir!).startsWith('..')).toBe(true);
+      expect(await fsp.lstat(path.join(workspace, 'node_modules')).catch(() => null)).toBeNull();
+      expect((await fsp.lstat(path.join(dependencyDir!, 'tmp'))).isDirectory()).toBe(true);
+      expect((await fsp.lstat(path.join(dependencyDir!, '.cache'))).isDirectory()).toBe(true);
+      expect((await fsp.lstat(path.join(dependencyDir!, 'bin'))).isDirectory()).toBe(true);
+      await fsp.writeFile(path.join(dependencyDir!, 'installed-package.py'), 'temporary');
+      await fsp.symlink(
+        `${SANDBOX_DEPENDENCY_MOUNT}/js/node_modules`,
+        path.join(workspace, 'node_modules'),
+      );
+
+      await job.cleanup();
+
+      expect(await fsp.lstat(dependencyDir!).catch(() => null)).toBeNull();
+      expect(await fsp.lstat(path.join(workspace, 'node_modules')).catch(() => null)).toBeNull();
+      expect((await fsp.lstat(workspace)).isDirectory()).toBe(true);
+    } finally {
+      await job.cleanup();
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   test('releases a UID slot when prime fails before a workspace lease is created', async () => {
     const availableBefore = sandboxJobUidPool.availableCount();
     const activeBefore = sandboxJobUidPool.activeCount();

@@ -11,7 +11,7 @@ import type { NsJailResult } from './nsjail';
 import type { Runtime } from './runtime';
 import { logger as rootLogger } from './logger';
 import { getRuntimes } from './runtime';
-import { execute } from './nsjail';
+import { execute, SANDBOX_DEPENDENCY_MOUNT } from './nsjail';
 import { config } from './config';
 import { internalServiceHeaders } from './internal-service-auth';
 import { EGRESS_GRANT_HEADER } from './egress';
@@ -57,6 +57,37 @@ export {
 } from './validation';
 
 const AUTO_LOAD_DIRKEEP_TIMEOUT_MS = 10000;
+
+function prependSearchPath(entries: string[], current?: string): string {
+  return [...entries, ...(current ? [current] : [])].join(':');
+}
+
+export function sandboxDependencyEnv(current: Record<string, string>): Record<string, string> {
+  return {
+    SANDBOX_DEPS_ROOT: SANDBOX_DEPENDENCY_MOUNT,
+    SANDBOX_DATA_ROOT: '/mnt/data',
+    PATH: prependSearchPath([
+      `${SANDBOX_DEPENDENCY_MOUNT}/bin`,
+      `${SANDBOX_DEPENDENCY_MOUNT}/python/bin`,
+      `${SANDBOX_DEPENDENCY_MOUNT}/js/node_modules/.bin`,
+    ], current.PATH ?? '/usr/local/bin:/usr/bin:/bin'),
+    PYTHONPATH: prependSearchPath([
+      `${SANDBOX_DEPENDENCY_MOUNT}/python`,
+    ], current.PYTHONPATH),
+    PIP_TARGET: `${SANDBOX_DEPENDENCY_MOUNT}/python`,
+    PIP_CACHE_DIR: `${SANDBOX_DEPENDENCY_MOUNT}/.cache/pip`,
+    PIP_DISABLE_PIP_VERSION_CHECK: '1',
+    PIP_NO_INPUT: '1',
+    UV_CACHE_DIR: `${SANDBOX_DEPENDENCY_MOUNT}/.cache/uv`,
+    NODE_PATH: prependSearchPath([
+      `${SANDBOX_DEPENDENCY_MOUNT}/js/node_modules`,
+    ], current.NODE_PATH),
+    NPM_CONFIG_PREFIX: `${SANDBOX_DEPENDENCY_MOUNT}/js`,
+    NPM_CONFIG_CACHE: `${SANDBOX_DEPENDENCY_MOUNT}/.cache/npm`,
+    BUN_INSTALL: `${SANDBOX_DEPENDENCY_MOUNT}/bun-install`,
+    TMPDIR: `${SANDBOX_DEPENDENCY_MOUNT}/tmp`,
+  };
+}
 
 /**
  * Bridges a `fetch` response body to a Node-stream Readable. The types at the
@@ -158,6 +189,17 @@ export function ensureNodeModulesSymlink(
     fs.symlinkSync(nodeModulesPath, linkPath, 'dir');
   } catch (err) {
     if (errorCode(err) !== 'EEXIST') throw err;
+  }
+}
+
+async function removeDependencyNodeModulesSymlink(submissionDir: string): Promise<void> {
+  if (!submissionDir) return;
+  const linkPath = path.join(submissionDir, 'node_modules');
+  const stat = await fsp.lstat(linkPath).catch(() => null);
+  if (!stat?.isSymbolicLink()) return;
+  const target = await fsp.readlink(linkPath);
+  if (target === `${SANDBOX_DEPENDENCY_MOUNT}/js/node_modules`) {
+    await fsp.unlink(linkPath);
   }
 }
 
@@ -489,6 +531,8 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   'MKL_NUM_THREADS',
   'OMP_NUM_THREADS',
   'SANDBOX_LANGUAGE',
+  'SANDBOX_DATA_ROOT',
+  'SANDBOX_DEPS_ROOT',
   'HOME',
   'PATH',
   'TOOL_CALL_SOCKET',
@@ -699,6 +743,7 @@ export class Job {
   private log: Logger;
   private submissionDir = '';
   private workspaceLease: SandboxWorkspaceLease | undefined;
+  private dependencyWorkspaceLease: SandboxWorkspaceLease | undefined;
   private jobIdentity: SandboxJobIdentity | undefined;
   private generatedFiles: GeneratedFile[] = [];
   /** Session output-diffing: fileId → {name, signature} pending a surfaced-mark.
@@ -948,6 +993,19 @@ export class Job {
       this.workspaceLease = await createSandboxWorkspace(this.jobIdentity);
     }
     this.submissionDir = this.workspaceLease.dir;
+    await removeDependencyNodeModulesSymlink(this.submissionDir);
+
+    this.dependencyWorkspaceLease = await createSandboxWorkspace(this.jobIdentity);
+    const dependencyRoot = this.dependencyWorkspaceLease.dir;
+    for (const relativeDir of [
+      'tmp',
+      '.cache',
+      'bin',
+    ]) {
+      const dependencyPath = path.join(dependencyRoot, relativeDir);
+      await this.ensureDirNoFollow(dependencyPath, dependencyRoot);
+      await this.secureAncestors(dependencyPath, dependencyRoot);
+    }
 
     if (!this.isSynthetic) {
       this.log.info(
@@ -1510,11 +1568,15 @@ export class Job {
       extraPkgdirs = aggregateBashExtras(this.runtime.pkgdir, envVars, undefined, linkTarget);
       ensureNodeModulesSymlink(this.submissionDir, linkTarget.nodeModulesPath);
     }
+    Object.assign(envVars, sandboxDependencyEnv(envVars));
+    const dependencyDir = this.dependencyWorkspaceLease?.dir;
+    if (!dependencyDir) throw new Error('Job dependency workspace has not been primed');
 
     return execute({
       command,
       envVars,
       submissionDir: this.submissionDir,
+      dependencyDir,
       pkgdir: this.runtime.pkgdir,
       timeout,
       memoryLimit,
@@ -2293,45 +2355,62 @@ export class Job {
       this.log.info('Cleaning up');
     }
 
-    /* Session mode: the workspace and pinned UID belong to the long-lived
-     * session, not this job. Keep both so the next call sees prior files;
-     * teardown happens on the /terminate hook (or explicit session reset). */
+    /* Session mode keeps only the user workspace and pinned UID. Dependencies
+     * are a separate per-execution lease and must be removed after every job. */
     if (this.session) {
+      await removeDependencyNodeModulesSymlink(this.submissionDir);
+      if (this.dependencyWorkspaceLease) {
+        await cleanupSandboxWorkspace(this.dependencyWorkspaceLease);
+        this.dependencyWorkspaceLease = undefined;
+      }
       this.workspaceLease = undefined;
       this.submissionDir = '';
       this.jobIdentity = undefined;
       return;
     }
 
-    let workspaceRemoved = true;
-    const workspaceLease = this.workspaceLease;
+    const workspaceLeases = [
+      this.dependencyWorkspaceLease,
+      this.workspaceLease,
+    ].filter((lease): lease is SandboxWorkspaceLease => lease !== undefined);
     const jobIdentity = this.jobIdentity;
-
-    if (workspaceLease) {
-      try {
-        workspaceRemoved = await cleanupSandboxWorkspace(workspaceLease);
-      } catch (error) {
-        workspaceRemoved = false;
-        this.log.error({ submissionDir: this.submissionDir, err: error }, 'Failed to clean up');
-      } finally {
-        this.workspaceLease = undefined;
-        this.submissionDir = '';
-      }
-    }
+    const cleanupResults = await Promise.all(
+      workspaceLeases.map(async lease => ({
+        lease,
+        removed: await cleanupSandboxWorkspace(lease),
+      })),
+    );
+    this.dependencyWorkspaceLease = undefined;
+    this.workspaceLease = undefined;
+    this.submissionDir = '';
 
     if (jobIdentity) {
-      if (!workspaceLease || workspaceRemoved) {
+      const failedLeases = cleanupResults
+        .filter(result => !result.removed)
+        .map(result => result.lease);
+      if (failedLeases.length === 0) {
         releaseJobIdentity(jobIdentity);
       } else {
-        retainWorkspaceCleanupUntilRemoved(workspaceLease, () => {
+        let remainingCleanups = failedLeases.length;
+        const releaseAfterLastCleanup = (): void => {
+          remainingCleanups--;
+          if (remainingCleanups !== 0) return;
           releaseJobIdentity(jobIdentity);
           this.log.info(
             { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
             'Released retained sandbox job UID slot after workspace cleanup',
           );
-        });
+        };
+        for (const lease of failedLeases) {
+          retainWorkspaceCleanupUntilRemoved(lease, releaseAfterLastCleanup);
+        }
         this.log.error(
-          { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
+          {
+            uid: jobIdentity.uid,
+            gid: jobIdentity.gid,
+            slot: jobIdentity.slot,
+            workspaces: failedLeases.map(lease => lease.workspaceId),
+          },
           'Retaining sandbox job UID slot after failed workspace cleanup',
         );
       }

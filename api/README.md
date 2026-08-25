@@ -21,7 +21,7 @@ Each code execution runs in a fresh NsJail sandbox with the following isolation:
 | **cgroups v2** | Memory, swap, PID limits | Prevents resource exhaustion |
 | **rlimits** | AS, fsize, nofile, nproc, cpu | Per-process resource caps |
 | **User mapping** | UID/GID 65534 (`nobody`) | No privilege escalation |
-| **Filesystem** | Read-only `/usr`, tmpfs `/tmp`, writable `/mnt/data` only | Minimal writable surface |
+| **Filesystem** | Read-only `/usr` and `/pkgs`; writable `/mnt/data` plus isolated `/mnt/deps` | User files stay noexec while temporary dependencies can execute without suid or devices |
 | **Network** | `clone_newnet` (empty network namespace) | No outbound connectivity by default |
 
 ## Configuration
@@ -69,6 +69,23 @@ Runtimes are auto-discovered from `/pkgs` at startup. Each package provides `com
 
 Other package-format-compatible runtimes (Go, Rust, Java, GCC) can be installed but may require additional system libraries to be added to the sandbox image.
 
+### Runtime dependency installation
+
+Each execution receives a private writable dependency layer at `/mnt/deps`.
+Use `sandbox-pkg pip <packages>`, `sandbox-pkg uv <packages>`,
+`sandbox-pkg npm <packages>`, or `sandbox-pkg bun <packages>`. The runner
+preconfigures Python and JavaScript search paths, caches, temporary files, and
+package binary paths, so installed dependencies can be imported or executed
+immediately in the same job.
+
+The layer runs as the unprivileged per-job UID and is deleted with the job. It
+is deliberately excluded from generated outputs and stateful checkpoints.
+`apt`, the guest root, and `/pkgs` remain unavailable for runtime mutation.
+Remote registry installs require `SANDBOX_DISABLE_NETWORKING=false`. Enabling
+them also lets untrusted package install scripts access every network address
+the sandbox can reach, so use only package sources appropriate for that trust
+boundary.
+
 ## Filesystem Layout Inside the Sandbox
 
 ```
@@ -76,6 +93,7 @@ Other package-format-compatible runtimes (Go, Rust, Java, GCC) can be installed 
   ├── *.py          User code files
   ├── *.js / *.ts   User code files
   └── ...           Downloaded files from file server
+/mnt/deps/          Per-execution dependency layer (writable, executable, nosuid, nodev)
 /tmp/               tmpfs (20MB, writable)
 /usr/               Host /usr (read-only bind mount)
 /bin -> /usr/bin    Symlink (merged-usr)

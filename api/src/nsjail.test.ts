@@ -211,6 +211,7 @@ exit 0
         command: ['/bin/bash', '/pkgs/bash/5.2.0/run', 'main.sh'],
         envVars: {},
         submissionDir,
+        dependencyDir: path.join(tmp, 'dependencies'),
         pkgdir: '/pkgs/bash/5.2.0',
         timeout: 1000,
         memoryLimit: -1,
@@ -265,6 +266,7 @@ exit 0
         command: ['/bin/bash', '/pkgs/bash/5.2.0/run', 'main.sh'],
         envVars: {},
         submissionDir,
+        dependencyDir: path.join(tmp, 'dependencies'),
         pkgdir: '/pkgs/bash/5.2.0',
         timeout: 5000,
         memoryLimit: -1,
@@ -323,6 +325,7 @@ exit 137
         command: ['/bin/bash', '/pkgs/bash/5.2.0/run', 'main.sh'],
         envVars: {},
         submissionDir,
+        dependencyDir: path.join(tmp, 'dependencies'),
         pkgdir: '/pkgs/bash/5.2.0',
         timeout: 5000,
         memoryLimit: -1,
@@ -343,18 +346,32 @@ exit 137
 });
 
 describe('renderJobConfigOverlay', () => {
-  test('binds submissionDir at /mnt/data with noexec/nosuid/nodev set', () => {
-    const overlay = renderJobConfigOverlay('/tmp/sandbox/ws_abc');
+  test('binds data noexec and exposes a separate executable dependency layer', () => {
+    const overlay = renderJobConfigOverlay(
+      '/tmp/sandbox/ws_data',
+      '/tmp/sandbox/ws_dependencies',
+    );
     /* Property-style assertions on the rendered Kafel/protobuf cfg. We
      * keep them line-anchored so a stray `noexec: false` elsewhere can't
      * accidentally satisfy the test. */
-    expect(overlay).toMatch(/^\s*src: "\/tmp\/sandbox\/ws_abc"$/m);
+    expect(overlay).toMatch(/^\s*src: "\/tmp\/sandbox\/ws_data"$/m);
     expect(overlay).toMatch(/^\s*dst: "\/mnt\/data"$/m);
     expect(overlay).toMatch(/^\s*is_bind: true$/m);
     expect(overlay).toMatch(/^\s*rw: true$/m);
     expect(overlay).toMatch(/^\s*noexec: true$/m);
     expect(overlay).toMatch(/^\s*nosuid: true$/m);
     expect(overlay).toMatch(/^\s*nodev: true$/m);
+    expect(overlay).toMatch(/^\s*src: "\/tmp\/sandbox\/ws_dependencies"$/m);
+    expect(overlay).toMatch(/^\s*dst: "\/mnt\/deps"$/m);
+
+    const dependencyBlock = overlay.match(
+      /mount \{\n\s*src: "\/tmp\/sandbox\/ws_dependencies"[\s\S]*?\n\}/,
+    )?.[0];
+    expect(dependencyBlock).toBeDefined();
+    expect(dependencyBlock).toMatch(/^\s*rw: true$/m);
+    expect(dependencyBlock).toMatch(/^\s*nosuid: true$/m);
+    expect(dependencyBlock).toMatch(/^\s*nodev: true$/m);
+    expect(dependencyBlock).not.toMatch(/^\s*noexec: true$/m);
   });
 
   test('escapes double quotes and backslashes so a quirky path cannot break the cfg parser', () => {
@@ -362,12 +379,16 @@ describe('renderJobConfigOverlay', () => {
      * meta-chars, but defense in depth: a future caller that passes an
      * arbitrary path must not be able to inject extra cfg fields by
      * embedding `" rw: false }` etc. */
-    const overlay = renderJobConfigOverlay('/tmp/sandbox/ws"injected\\path');
-    expect(overlay).toContain('src: "/tmp/sandbox/ws\\"injected\\\\path"');
-    /* The injected `"` must NOT terminate the string mid-stream — assert
-     * we still have exactly one src line. */
+    const overlay = renderJobConfigOverlay(
+      '/tmp/sandbox/ws"data\\path',
+      '/tmp/sandbox/ws"dependencies\\path',
+    );
+    expect(overlay).toContain('src: "/tmp/sandbox/ws\\"data\\\\path"');
+    expect(overlay).toContain('src: "/tmp/sandbox/ws\\"dependencies\\\\path"');
+    /* An injected `"` must not terminate either source string mid-stream. */
     const srcLines = overlay.split('\n').filter(l => l.includes('src:'));
-    expect(srcLines.length).toBe(1);
+    expect(srcLines).toHaveLength(2);
+    expect(srcLines.every(line => line.includes('ws\\"'))).toBe(true);
   });
 });
 

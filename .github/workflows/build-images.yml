@@ -79,6 +79,9 @@ jobs:
       - name: Test resolver handoff
         run: tests/runtime_resolver_handoff.sh
 
+      - name: Test sandbox package installer
+        run: tests/sandbox_pkg.sh
+
       - name: Install policy test dependencies
         run: |
           python3 -m venv /tmp/codeapi-policy-venv
