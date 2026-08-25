@@ -499,6 +499,24 @@ describe('NsJail seccomp policy', () => {
     }
   });
 
+  test('keeps kernel-control families denied even with engineering tools installed', () => {
+    const originalDisableNetworking = config.disable_networking;
+    const socketRule = () => {
+      const errnoBlock = seccompPolicy().split('ERRNO(1)')[1] ?? '';
+      return errnoBlock.split('\n').find(line => line.includes('socket(domain)')) ?? '';
+    };
+
+    try {
+      config.disable_networking = true;
+      expect(socketRule()).toBe('    socket(domain) { domain != AF_VSOCK },');
+
+      config.disable_networking = false;
+      expect(socketRule()).toBe('    socket(domain) { domain != AF_VSOCK && domain != AF_INET && domain != AF_INET6 },');
+    } finally {
+      config.disable_networking = originalDisableNetworking;
+    }
+  });
+
   test('KILLs the defense-in-depth batch from the audit', () => {
     const policy = seccompPolicy();
     for (const name of ['settimeofday', 'adjtimex', 'clock_adjtime', 'syslog']) {
