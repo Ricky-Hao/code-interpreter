@@ -142,6 +142,7 @@ RUN apt-get update && \
 # in its minimal build.
 RUN [ -x /usr/bin/mawk ] && ln -sf /usr/bin/mawk /usr/bin/awk \
     && [ -x /usr/bin/fdfind ] && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && [ -x /usr/bin/nc.openbsd ] && ln -sf /usr/bin/nc.openbsd /usr/local/bin/nc \
     && for command in \
         curl wget git git-lfs gh \
         ssh scp sftp ssh-keygen rsync rg fd patch less \
