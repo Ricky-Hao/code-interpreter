@@ -430,7 +430,7 @@ describe('NsJail seccomp policy', () => {
     expect(killSocketRule).toBeDefined();
     expect(killSocketRule).toContain('AF_VSOCK');
 
-    const errnoSocketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain)'));
+    const errnoSocketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain, sock_type, protocol)'));
     expect(errnoSocketRule).toBeDefined();
     expect(errnoSocketRule).not.toContain('AF_VSOCK');
   });
@@ -438,7 +438,7 @@ describe('NsJail seccomp policy', () => {
   test('rejects kernel-control socket entry points in the sandbox', () => {
     const policy = seccompPolicy();
     const errnoBlock = policy.split('ERRNO(1)')[1] ?? '';
-    const socketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain)'));
+    const socketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain, sock_type, protocol)'));
     expect(socketRule).toBeDefined();
     for (const family of ['AF_ALG', 'AF_RXRPC', 'AF_NETLINK', 'AF_KEY']) {
       expect(socketRule).toContain(family);
@@ -451,7 +451,7 @@ describe('NsJail seccomp policy', () => {
     const internetFamilyPattern = /\bAF_INET6?\b/;
     const socketRule = () => {
       const errnoBlock = seccompPolicy().split('ERRNO(1)')[1] ?? '';
-      return errnoBlock.split('\n').find(line => line.includes('socket(domain)')) ?? '';
+      return errnoBlock.split('\n').find(line => line.includes('socket(domain, sock_type, protocol)')) ?? '';
     };
 
     try {
@@ -460,6 +460,29 @@ describe('NsJail seccomp policy', () => {
 
       config.disable_networking = false;
       expect(socketRule()).not.toMatch(internetFamilyPattern);
+    } finally {
+      config.disable_networking = originalDisableNetworking;
+    }
+  });
+
+  test('allows only route and socket-diagnostic netlink protocols when networking is enabled', () => {
+    const originalDisableNetworking = config.disable_networking;
+    const socketRule = () => {
+      const errnoBlock = seccompPolicy().split('ERRNO(1)')[1] ?? '';
+      return errnoBlock.split('\n').find(line => line.includes('socket(domain, sock_type, protocol)')) ?? '';
+    };
+
+    try {
+      config.disable_networking = true;
+      expect(socketRule()).toContain('domain == AF_NETLINK ||');
+      expect(socketRule()).not.toContain('protocol != NETLINK_ROUTE');
+
+      config.disable_networking = false;
+      expect(socketRule()).toContain(
+        '(domain == AF_NETLINK && protocol != NETLINK_ROUTE && protocol != NETLINK_SOCK_DIAG)',
+      );
+      expect(seccompPolicy()).toContain('#define NETLINK_ROUTE 0');
+      expect(seccompPolicy()).toContain('#define NETLINK_SOCK_DIAG 4');
     } finally {
       config.disable_networking = originalDisableNetworking;
     }

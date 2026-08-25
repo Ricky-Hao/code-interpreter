@@ -63,14 +63,59 @@ function prependSearchPath(entries: string[], current?: string): string {
 }
 
 export function sandboxDependencyEnv(current: Record<string, string>): Record<string, string> {
+  const debRoot = `${SANDBOX_DEPENDENCY_MOUNT}/deb`;
+  const debMultiarch = process.arch === 'arm64'
+    ? 'aarch64-linux-gnu'
+    : 'x86_64-linux-gnu';
+  const debLibraryPaths = [
+    `${debRoot}/usr/local/lib/${debMultiarch}`,
+    `${debRoot}/usr/local/lib`,
+    `${debRoot}/usr/lib/${debMultiarch}`,
+    `${debRoot}/lib/${debMultiarch}`,
+    `${debRoot}/usr/lib64`,
+    `${debRoot}/lib64`,
+    `${debRoot}/usr/lib`,
+    `${debRoot}/lib`,
+  ];
   return {
     SANDBOX_DEPS_ROOT: SANDBOX_DEPENDENCY_MOUNT,
     SANDBOX_DATA_ROOT: '/mnt/data',
+    SANDBOX_DEB_ROOT: debRoot,
     PATH: prependSearchPath([
       `${SANDBOX_DEPENDENCY_MOUNT}/bin`,
       `${SANDBOX_DEPENDENCY_MOUNT}/python/bin`,
       `${SANDBOX_DEPENDENCY_MOUNT}/js/node_modules/.bin`,
+      `${debRoot}/usr/local/sbin`,
+      `${debRoot}/usr/local/bin`,
+      `${debRoot}/usr/sbin`,
+      `${debRoot}/usr/bin`,
+      `${debRoot}/sbin`,
+      `${debRoot}/bin`,
+      `${debRoot}/usr/games`,
     ], current.PATH ?? '/usr/local/bin:/usr/bin:/bin'),
+    LD_LIBRARY_PATH: prependSearchPath(debLibraryPaths, current.LD_LIBRARY_PATH),
+    LIBRARY_PATH: prependSearchPath(debLibraryPaths, current.LIBRARY_PATH),
+    CPATH: prependSearchPath([
+      `${debRoot}/usr/local/include`,
+      `${debRoot}/usr/include/${debMultiarch}`,
+      `${debRoot}/usr/include`,
+    ], current.CPATH),
+    PKG_CONFIG_PATH: prependSearchPath([
+      `${debRoot}/usr/local/lib/pkgconfig`,
+      `${debRoot}/usr/local/lib/${debMultiarch}/pkgconfig`,
+      `${debRoot}/usr/local/share/pkgconfig`,
+      `${debRoot}/usr/lib/${debMultiarch}/pkgconfig`,
+      `${debRoot}/usr/lib/pkgconfig`,
+      `${debRoot}/usr/share/pkgconfig`,
+    ], current.PKG_CONFIG_PATH),
+    CMAKE_PREFIX_PATH: prependSearchPath([
+      `${debRoot}/usr/local`,
+      `${debRoot}/usr`,
+    ], current.CMAKE_PREFIX_PATH),
+    XDG_DATA_DIRS: prependSearchPath([
+      `${debRoot}/usr/local/share`,
+      `${debRoot}/usr/share`,
+    ], current.XDG_DATA_DIRS ?? '/usr/local/share:/usr/share'),
     PYTHONPATH: prependSearchPath([
       `${SANDBOX_DEPENDENCY_MOUNT}/python`,
     ], current.PYTHONPATH),
@@ -533,8 +578,14 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   'SANDBOX_LANGUAGE',
   'SANDBOX_DATA_ROOT',
   'SANDBOX_DEPS_ROOT',
+  'SANDBOX_DEB_ROOT',
   'HOME',
   'PATH',
+  'LIBRARY_PATH',
+  'CPATH',
+  'PKG_CONFIG_PATH',
+  'CMAKE_PREFIX_PATH',
+  'XDG_DATA_DIRS',
   'TOOL_CALL_SOCKET',
   'PYTHONPATH',
   'PYTHONSTARTUP',

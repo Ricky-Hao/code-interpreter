@@ -88,6 +88,44 @@ RUN apt-get update && \
     libprotobuf32 \
     libffi8 \
     ca-certificates \
+    curl \
+    wget \
+    git \
+    git-lfs \
+    gh \
+    openssh-client \
+    rsync \
+    ripgrep \
+    fd-find \
+    patch \
+    less \
+    zip \
+    unzip \
+    xz-utils \
+    bzip2 \
+    zstd \
+    make \
+    gcc \
+    g++ \
+    clang \
+    cmake \
+    ninja-build \
+    pkg-config \
+    binutils \
+    sqlite3 \
+    iproute2 \
+    iputils-ping \
+    dnsutils \
+    netcat-openbsd \
+    socat \
+    lsof \
+    strace \
+    psmisc \
+    shellcheck \
+    shfmt \
+    tree \
+    debianutils \
+    time \
     && rm -rf /var/lib/apt/lists/* \
     && libffi=$(find /usr/lib -name 'libffi.so.8' -print -quit) \
     && { [ -n "$libffi" ] || { echo "libffi.so.8 not found" >&2; exit 1; }; } \
@@ -102,7 +140,17 @@ RUN apt-get update && \
 # security surface to the existing pure-text utilities (sed, tr,
 # coreutils) — mawk has no system() / getline-from-command extensions
 # in its minimal build.
-RUN [ -x /usr/bin/mawk ] && ln -sf /usr/bin/mawk /usr/bin/awk
+RUN [ -x /usr/bin/mawk ] && ln -sf /usr/bin/mawk /usr/bin/awk \
+    && [ -x /usr/bin/fdfind ] && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && for command in \
+        curl wget git git-lfs gh \
+        ssh scp sftp ssh-keygen rsync rg fd patch less \
+        zip unzip xz bzip2 zstd make gcc g++ clang cmake ninja pkg-config \
+        ld ar objdump sqlite3 ip ss ping dig nslookup host nc socat \
+        lsof strace pstree shellcheck shfmt tree which time; do \
+        command -v "$command" >/dev/null || { echo "Missing sandbox command: $command" >&2; exit 1; }; \
+    done \
+    && [ -x /usr/bin/time ]
 
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
@@ -136,7 +184,7 @@ RUN mkdir -p /pkgs /tmp/sandbox
 RUN find / -xdev -perm /6000 -exec chmod ug-s {} + 2>/dev/null || true
 
 RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
-         /usr/bin/perl* /usr/bin/apt /usr/bin/apt-get /usr/bin/dpkg \
+         /usr/bin/perl* /usr/bin/apt /usr/bin/dpkg \
          /usr/sbin/adduser /usr/sbin/useradd /usr/sbin/usermod \
          /usr/sbin/groupadd /usr/sbin/groupmod \
          /usr/bin/su \
@@ -148,7 +196,21 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
 COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
 COPY docker/sandbox-pkg /usr/local/bin/sandbox-pkg
-RUN chmod +x ./entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh /usr/local/bin/sandbox-pkg
+RUN chmod +x ./entrypoint.sh /usr/local/libexec/codeapi-runtime-resolver.sh /usr/local/bin/sandbox-pkg \
+    && command -v apt-get >/dev/null \
+    && command -v apt-cache >/dev/null \
+    && command -v dpkg-deb >/dev/null \
+    && ! command -v apt >/dev/null \
+    && ! command -v dpkg >/dev/null \
+    && smoke_root=$(mktemp -d) \
+    && mkdir -p /mnt/deps /mnt/data "$smoke_root/home" \
+    && chown -R 65534:65534 /mnt/deps /mnt/data "$smoke_root" \
+    && setpriv --reuid=65534 --regid=65534 --clear-groups env \
+        HOME="$smoke_root/home" \
+        /usr/local/bin/sandbox-pkg deb hello \
+    && [ "$(setpriv --reuid=65534 --regid=65534 --clear-groups \
+        /mnt/deps/deb/usr/bin/hello)" = "Hello, world!" ] \
+    && rm -rf /mnt/deps /mnt/data "$smoke_root"
 
 # ============================================================================
 # Stage 2b: AWS Lambda MicroVM container base image

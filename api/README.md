@@ -17,7 +17,7 @@ Each code execution runs in a fresh NsJail sandbox with the following isolation:
 | Layer | Mechanism | Effect |
 |-------|-----------|--------|
 | **Namespaces** | PID, mount, network, user, IPC, UTS, cgroup | Complete process and filesystem isolation |
-| **Seccomp-bpf** | Kafel policy in `nsjail.ts` | Blocks dangerous syscalls (`ptrace`, `mount`, `bpf`, etc.), kernel-control socket families (`AF_KEY`, `AF_NETLINK`, `AF_RXRPC`), nested namespace creation, and returns `EPERM`/`ENOSYS` for runtime probes like `io_uring` and `clone3` |
+| **Seccomp-bpf** | Kafel policy in `nsjail.ts` | Blocks dangerous syscalls (`ptrace`, `mount`, `bpf`, etc.), kernel-control socket families, nested namespace creation, and returns `EPERM`/`ENOSYS` for runtime probes like `io_uring` and `clone3`; network-enabled jobs allow only unprivileged route and socket-diagnostic netlink protocols for `ip`/`ss` |
 | **cgroups v2** | Memory, swap, PID limits | Prevents resource exhaustion |
 | **rlimits** | AS, fsize, nofile, nproc, cpu | Per-process resource caps |
 | **User mapping** | UID/GID 65534 (`nobody`) | No privilege escalation |
@@ -67,24 +67,43 @@ Runtimes are auto-discovered from `/pkgs` at startup. Each package provides `com
 - **Node.js** 24 -- runs `.js` files with curated offline npm packages
 - **Bun** (JavaScript/TypeScript) -- runs `.js`, `.ts`, and `.bun` files with the same curated offline package set
 
-Other package-format-compatible runtimes (Go, Rust, Java, GCC) can be installed but may require additional system libraries to be added to the sandbox image.
+The Bash runtime also exposes a baked engineering toolchain:
+
+- Network and source control: `curl`, `wget`, `git`, `git-lfs`, `gh`, OpenSSH clients, and `rsync`
+- Search and file utilities: `rg`, `fd`, `patch`, `less`, archive/compression tools, `tree`, `which`, and `time`
+- Build tools: GCC/G++, Clang, CMake, Ninja, pkg-config, and binutils
+- Data, network, and diagnostics: SQLite, iproute2, ping/DNS/netcat/socat tools, `lsof`, `strace`, and `pstree`
+- Shell quality: `shellcheck` and `shfmt`
+
+Other package-format-compatible runtimes (Go, Rust, and Java) can be installed
+but may require additional system libraries.
 
 ### Runtime dependency installation
 
 Each execution receives a private writable dependency layer at `/mnt/deps`.
 Use `sandbox-pkg pip <packages>`, `sandbox-pkg uv <packages>`,
-`sandbox-pkg npm <packages>`, or `sandbox-pkg bun <packages>`. The runner
-preconfigures Python and JavaScript search paths, caches, temporary files, and
-package binary paths, so installed dependencies can be imported or executed
-immediately in the same job.
+`sandbox-pkg npm <packages>`, `sandbox-pkg bun <packages>`, or
+`sandbox-pkg apt <packages>` (`deb` is an alias). The runner preconfigures
+Python and JavaScript search paths, caches, temporary files, and package binary
+paths, so installed dependencies can be imported or executed immediately in
+the same job.
+
+The Debian mode uses private APT state and cache directories under
+`/mnt/deps`, downloads packages from the guest's configured signed sources,
+and extracts their data payloads under `/mnt/deps/deb`. It never invokes
+`dpkg --install`, maintainer scripts, or service activation. Extracted binary,
+library, header, pkg-config, CMake, and shared-data paths are activated for the
+job. This relocation is best effort: packages that require post-install setup,
+system services, kernel integration, or absolute filesystem locations may not
+work. It is not root access or a mutable Debian installation.
 
 The layer runs as the unprivileged per-job UID and is deleted with the job. It
-is deliberately excluded from generated outputs and stateful checkpoints.
-`apt`, the guest root, and `/pkgs` remain unavailable for runtime mutation.
-Remote registry installs require `SANDBOX_DISABLE_NETWORKING=false`. Enabling
-them also lets untrusted package install scripts access every network address
-the sandbox can reach, so use only package sources appropriate for that trust
-boundary.
+is deliberately excluded from generated outputs and stateful checkpoints. The
+interactive `apt` and full `dpkg` frontends are absent; the guest root and
+`/pkgs` remain unavailable for runtime mutation. Remote registry installs
+require `SANDBOX_DISABLE_NETWORKING=false`. Enabling them also lets untrusted
+package install scripts access every network address the sandbox can reach, so
+use only package sources appropriate for that trust boundary.
 
 ## Filesystem Layout Inside the Sandbox
 

@@ -97,6 +97,9 @@ function buildSeccompPolicy(): string {
   const internetSocketFamilies = config.disable_networking
     ? 'domain == AF_INET || domain == AF_INET6 || '
     : '';
+  const netlinkProtocols = config.disable_networking
+    ? 'domain == AF_NETLINK || '
+    : '(domain == AF_NETLINK && protocol != NETLINK_ROUTE && protocol != NETLINK_SOCK_DIAG) || ';
 
   return [
     ...syscallDefines,
@@ -107,6 +110,8 @@ function buildSeccompPolicy(): string {
     '#define AF_RXRPC 33',
     '#define AF_ALG 38',
     '#define AF_VSOCK 40',
+    '#define NETLINK_ROUTE 0',
+    '#define NETLINK_SOCK_DIAG 4',
     '#define CLONE_NAMESPACE_FLAGS 0x7e020000',
     '#define KVM_IOCTL_MAGIC 0xAE00',
     'POLICY sandbox {',
@@ -169,10 +174,10 @@ function buildSeccompPolicy(): string {
      * runtimes the sandbox supports. */
     '    pidfd_open(pid) { pid == 1 },',
     '    pidfd_send_signal,',
-    /* Ordinary Internet sockets remain blocked in isolated mode. Kernel-control
-     * families stay blocked in both modes: AF_ALG covers the kernel crypto API
-     * used by Copy Fail, and AF_RXRPC covers the family used by Dirty Frag. */
-    `    socket(domain) { ${internetSocketFamilies}domain == AF_NETLINK || domain == AF_KEY || domain == AF_RXRPC || domain == AF_ALG }`,
+    /* Ordinary Internet sockets remain blocked in isolated mode. AF_NETLINK is
+     * limited to unprivileged route and socket diagnostics when networking is
+     * enabled; other kernel-control families stay blocked in both modes. */
+    `    socket(domain, sock_type, protocol) { ${internetSocketFamilies}${netlinkProtocols}domain == AF_KEY || domain == AF_RXRPC || domain == AF_ALG }`,
     '  }',
     '}',
     'USE sandbox DEFAULT ALLOW',

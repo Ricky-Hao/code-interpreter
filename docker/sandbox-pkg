@@ -3,10 +3,12 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-Usage: sandbox-pkg <pip|uv|npm|bun> PACKAGE...
+Usage: sandbox-pkg <pip|uv|npm|bun|apt|deb> PACKAGE...
 
 Installs dependencies into the writable per-execution /mnt/deps layer.
-System packages are not supported; the Debian guest and /pkgs stay read-only.
+Debian packages are extracted without maintainer scripts; the guest and /pkgs
+stay read-only, and system services or packages requiring post-install setup
+are not supported.
 EOF
     exit 2
 }
@@ -20,15 +22,25 @@ if [ "$#" -eq 0 ]; then
     usage
 fi
 
-deps_root="${SANDBOX_DEPS_ROOT:-/mnt/deps}"
+deps_root="/mnt/deps"
+data_root="/mnt/data"
+if [ "$EUID" -eq 0 ]; then
+    deps_root="${SANDBOX_DEPS_ROOT:-$deps_root}"
+    data_root="${SANDBOX_DATA_ROOT:-$data_root}"
+fi
 case "$deps_root" in
     /*) ;;
     *) echo "sandbox-pkg: SANDBOX_DEPS_ROOT must be absolute" >&2; exit 2 ;;
 esac
-data_root="${SANDBOX_DATA_ROOT:-/mnt/data}"
 case "$data_root" in
     /*) ;;
     *) echo "sandbox-pkg: SANDBOX_DATA_ROOT must be absolute" >&2; exit 2 ;;
+esac
+case "$deps_root$data_root" in
+    *'"'*|*';'*|*$'\n'*|*$'\r'*)
+        echo "sandbox-pkg: dependency paths contain unsupported characters" >&2
+        exit 2
+        ;;
 esac
 
 mkdir -p \
@@ -106,6 +118,140 @@ activate_js_modules() {
     ln -s "$deps_root/js/node_modules" "$link_path"
 }
 
+install_deb_packages() {
+    local apt_get="/usr/bin/apt-get"
+    local apt_cache="/usr/bin/apt-cache"
+    local dpkg_deb="/usr/bin/dpkg-deb"
+    if [ "$EUID" -eq 0 ]; then
+        apt_get="$(command -v apt-get || true)"
+        apt_cache="$(command -v apt-cache || true)"
+        dpkg_deb="$(command -v dpkg-deb || true)"
+    fi
+    [ -x "$apt_get" ] || {
+        echo "sandbox-pkg: apt-get is unavailable in this runtime" >&2
+        exit 1
+    }
+    [ -x "$apt_cache" ] || {
+        echo "sandbox-pkg: apt-cache is unavailable in this runtime" >&2
+        exit 1
+    }
+    [ -x "$dpkg_deb" ] || {
+        echo "sandbox-pkg: dpkg-deb is unavailable in this runtime" >&2
+        exit 1
+    }
+
+    local apt_arch
+    case "$(/usr/bin/uname -m)" in
+        x86_64) apt_arch="amd64" ;;
+        aarch64) apt_arch="arm64" ;;
+        *) echo "sandbox-pkg: unsupported Debian architecture" >&2; exit 1 ;;
+    esac
+
+    local package requested name architecture version
+    local package_names=()
+    for package in "$@"; do
+        requested="${package%%=*}"
+        version=""
+        if [[ "$package" == *=* ]]; then
+            version="${package#*=}"
+            if [ -z "$version" ] || [[ ! "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+:~_-]*$ ]]; then
+                echo "sandbox-pkg: invalid Debian package version: $package" >&2
+                exit 2
+            fi
+        fi
+        name="$requested"
+        architecture=""
+        if [[ "$requested" == *:* ]]; then
+            name="${requested%:*}"
+            architecture="${requested##*:}"
+        fi
+        if [ "${#name}" -lt 2 ] \
+            || [[ ! "$name" =~ ^[a-z0-9][a-z0-9+.-]*$ ]] \
+            || [[ "$name" == *..* ]] \
+            || [[ "$name" == *- ]] \
+            || { [ -n "$architecture" ] && [ "$architecture" != "$apt_arch" ]; }; then
+            echo "sandbox-pkg: invalid Debian package spec: $package" >&2
+            exit 2
+        fi
+        package_names+=("$name")
+    done
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    local apt_root="$deps_root/apt"
+    local deb_root="$deps_root/deb"
+    local apt_config archive archive_root archive_root_quoted stage_root metadata found
+
+    mkdir -p \
+        "$apt_root/state/lists/partial" \
+        "$apt_root/cache/archives" \
+        "$deb_root"
+    archive_root="$(mktemp -d "$apt_root/cache/archives/run.XXXXXX")"
+    mkdir -p "$archive_root/partial" "$archive_root/apt.conf.d"
+    stage_root="$archive_root/extracted"
+    mkdir -p "$stage_root"
+    apt_config="$archive_root/sandbox-pkg.conf"
+    printf -v archive_root_quoted '%q' "$archive_root"
+    trap "rm -rf -- $archive_root_quoted" EXIT
+    local apt_options=(
+        -o "APT::Sandbox::User="
+        -o "Debug::NoLocking=true"
+        -o "Acquire::Languages=none"
+        -o "APT::Architecture=$apt_arch"
+        -o "APT::Architectures::=$apt_arch"
+        -o "APT::Get::AllowUnauthenticated=false"
+        -o "Acquire::AllowInsecureRepositories=false"
+        -o "Acquire::AllowDowngradeToInsecureRepositories=false"
+        -o "Dir::Etc::sourcelist=/etc/apt/sources.list"
+        -o "Dir::Etc::sourceparts=/etc/apt/sources.list.d"
+        -o "Dir::Etc::trusted=/etc/apt/trusted.gpg"
+        -o "Dir::Etc::trustedparts=/etc/apt/trusted.gpg.d"
+        -o "Dir::State=$apt_root/state"
+        -o "Dir::State::lists=$apt_root/state/lists"
+        -o "Dir::State::status=/var/lib/dpkg/status"
+        -o "Dir::Cache=$apt_root/cache"
+        -o "Dir::Cache::archives=$archive_root"
+    )
+    printf 'Dir::Etc::parts "%s";\nDir::Etc::main "%s";\n' \
+        "$archive_root/apt.conf.d" "$archive_root/apt.conf" > "$apt_config"
+    : > "$archive_root/apt.conf"
+    export APT_CONFIG="$apt_config"
+
+    if [ ! -f "$apt_root/state/lists/.sandbox-pkg-updated" ]; then
+        "$apt_get" "${apt_options[@]}" update
+        touch "$apt_root/state/lists/.sandbox-pkg-updated"
+    fi
+    for name in "${package_names[@]}"; do
+        metadata="$("$apt_cache" "${apt_options[@]}" show --no-all-versions "$name" 2>/dev/null || true)"
+        found=false
+        while IFS= read -r line; do
+            if [ "$line" = "Package: $name" ]; then
+                found=true
+                break
+            fi
+        done <<< "$metadata"
+        if [ "$found" != true ]; then
+            echo "sandbox-pkg: Debian package not found: $name" >&2
+            exit 1
+        fi
+    done
+    "$apt_get" "${apt_options[@]}" \
+        --yes \
+        --no-install-recommends \
+        --no-remove \
+        --download-only \
+        install "$@"
+
+    for archive in "$archive_root"/*.deb; do
+        [ -f "$archive" ] || continue
+        "$dpkg_deb" --extract "$archive" "$stage_root"
+    done
+    find "$stage_root" -xdev -perm /6000 -exec chmod ug-s {} +
+    cp -a "$stage_root"/. "$deb_root"/
+    rm -rf "$archive_root"
+    trap - EXIT
+}
+
 case "$manager" in
     pip|python)
         command -v python3 >/dev/null 2>&1 || {
@@ -159,6 +305,9 @@ case "$manager" in
         bun add "$@"
         seed_baked_node_modules
         activate_js_modules
+        ;;
+    apt|deb)
+        install_deb_packages "$@"
         ;;
     *)
         echo "sandbox-pkg: unsupported manager: $manager" >&2

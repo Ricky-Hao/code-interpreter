@@ -45,18 +45,45 @@ function makeRuntime(overrides: Partial<Runtime> & { language: string; pkgdir: s
 
 describe('sandboxDependencyEnv', () => {
   it('prepends writable dependency locations while preserving runtime paths', () => {
+    const debMultiarch = process.arch === 'arm64'
+      ? 'aarch64-linux-gnu'
+      : 'x86_64-linux-gnu';
     const env = sandboxDependencyEnv({
       PATH: '/pkgs/python/3.14.4/bin:/usr/bin:/bin',
+      LD_LIBRARY_PATH: '/runtime/lib',
+      LIBRARY_PATH: '/runtime/linker',
+      CPATH: '/runtime/include',
+      PKG_CONFIG_PATH: '/runtime/pkgconfig',
+      CMAKE_PREFIX_PATH: '/runtime/cmake',
+      XDG_DATA_DIRS: '/runtime/share',
       PYTHONPATH: '/runtime/python',
       NODE_PATH: '/runtime/node_modules',
     });
 
     expect(env.SANDBOX_DEPS_ROOT).toBe('/mnt/deps');
     expect(env.SANDBOX_DATA_ROOT).toBe('/mnt/data');
+    expect(env.SANDBOX_DEB_ROOT).toBe('/mnt/deps/deb');
     expect(env.PIP_TARGET).toBe('/mnt/deps/python');
     expect(env.TMPDIR).toBe('/mnt/deps/tmp');
     expect(env.PATH.startsWith('/mnt/deps/bin:/mnt/deps/python/bin:')).toBe(true);
+    expect(env.PATH).toContain('/mnt/deps/deb/usr/bin');
     expect(env.PATH.endsWith('/pkgs/python/3.14.4/bin:/usr/bin:/bin')).toBe(true);
+    expect(env.LD_LIBRARY_PATH).toBe(
+      `/mnt/deps/deb/usr/local/lib/${debMultiarch}:/mnt/deps/deb/usr/local/lib:/mnt/deps/deb/usr/lib/${debMultiarch}:/mnt/deps/deb/lib/${debMultiarch}:/mnt/deps/deb/usr/lib64:/mnt/deps/deb/lib64:/mnt/deps/deb/usr/lib:/mnt/deps/deb/lib:/runtime/lib`,
+    );
+    expect(env.LIBRARY_PATH.endsWith(':/runtime/linker')).toBe(true);
+    expect(env.CPATH).toBe(
+      `/mnt/deps/deb/usr/local/include:/mnt/deps/deb/usr/include/${debMultiarch}:/mnt/deps/deb/usr/include:/runtime/include`,
+    );
+    expect(env.PKG_CONFIG_PATH).toBe(
+      `/mnt/deps/deb/usr/local/lib/pkgconfig:/mnt/deps/deb/usr/local/lib/${debMultiarch}/pkgconfig:/mnt/deps/deb/usr/local/share/pkgconfig:/mnt/deps/deb/usr/lib/${debMultiarch}/pkgconfig:/mnt/deps/deb/usr/lib/pkgconfig:/mnt/deps/deb/usr/share/pkgconfig:/runtime/pkgconfig`,
+    );
+    expect(env.CMAKE_PREFIX_PATH).toBe(
+      '/mnt/deps/deb/usr/local:/mnt/deps/deb/usr:/runtime/cmake',
+    );
+    expect(env.XDG_DATA_DIRS).toBe(
+      '/mnt/deps/deb/usr/local/share:/mnt/deps/deb/usr/share:/runtime/share',
+    );
     expect(env.PYTHONPATH).toBe('/mnt/deps/python:/runtime/python');
     expect(env.NODE_PATH).toBe(
       '/mnt/deps/js/node_modules:/runtime/node_modules',
@@ -80,7 +107,7 @@ describe('sandboxDependencyEnv', () => {
     Object.assign(env, sandboxDependencyEnv(env));
 
     expect(env.PATH).toBe(
-      '/mnt/deps/bin:/mnt/deps/python/bin:/mnt/deps/js/node_modules/.bin:/pkg/node/bin:/pkg/bash/bin',
+      '/mnt/deps/bin:/mnt/deps/python/bin:/mnt/deps/js/node_modules/.bin:/mnt/deps/deb/usr/local/sbin:/mnt/deps/deb/usr/local/bin:/mnt/deps/deb/usr/sbin:/mnt/deps/deb/usr/bin:/mnt/deps/deb/sbin:/mnt/deps/deb/bin:/mnt/deps/deb/usr/games:/pkg/node/bin:/pkg/bash/bin',
     );
     expect(env.NODE_PATH).toBe(
       '/mnt/deps/js/node_modules:/pkg/node/node_modules',
@@ -93,6 +120,12 @@ describe('dependency environment isolation', () => {
     expect(filterExtraEnvVars({
       SANDBOX_DEPS_ROOT: '/mnt/data/attacker-deps',
       SANDBOX_DATA_ROOT: '/mnt/deps/js',
+      SANDBOX_DEB_ROOT: '/mnt/data/fake-root',
+      LIBRARY_PATH: '/mnt/data/linker',
+      CPATH: '/mnt/data/include',
+      PKG_CONFIG_PATH: '/mnt/data/pkgconfig',
+      CMAKE_PREFIX_PATH: '/mnt/data/cmake',
+      XDG_DATA_DIRS: '/mnt/data/share',
       USER_SETTING: 'allowed',
     })).toEqual({ USER_SETTING: 'allowed' });
   });

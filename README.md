@@ -22,14 +22,23 @@ digest; the workflow intentionally does not publish mutable `latest` tags.
 - **Egress Gateway** - Enforces artifact grants and proxies authenticated sandbox tool calls
 - **Tool Call Server** - Handles programmatic tool calls from within sandbox sessions
 
-Python, Node, and Bun are baked into the default microVM block-root image. A
+Python, Node, Bun, and a general engineering CLI toolchain are baked into the
+default microVM block-root image. The CLI set includes curl/wget, Git/Git LFS/GitHub
+CLI, OpenSSH clients, rsync, search and archive utilities, GCC/Clang/CMake/Ninja,
+SQLite, network diagnostics, process diagnostics, ShellCheck, and shfmt. A
 package-init PVC mode remains available for direct NsJail development.
-Jobs can also install missing Python or JavaScript dependencies into an
-isolated, executable `/mnt/deps` layer with `sandbox-pkg pip|uv|npm|bun`. This
-layer is unprivileged and temporary to one execution; it does not make the
-read-only guest OS or baked package tree mutable. Remote registry installs
-require sandbox networking and run third-party package install code with the
-sandbox's network reachability.
+
+Jobs can install missing Python, JavaScript, or Debian dependencies into an
+isolated, executable `/mnt/deps` layer with
+`sandbox-pkg pip|uv|npm|bun|apt|deb`. Debian packages are downloaded from the
+guest's signed APT sources and extracted without `dpkg --install`, maintainer
+scripts, service activation, or root access. Binary, library, header,
+pkg-config, and CMake discovery paths are configured automatically. The layer
+is unprivileged and temporary to one execution; it does not make the read-only
+guest OS or baked package tree mutable. Packages requiring maintainer scripts,
+services, kernel integration, or absolute system paths may not work in this
+relocated form. Remote installs require sandbox networking and run third-party
+package code with the sandbox's network reachability.
 
 ## Architecture
 
