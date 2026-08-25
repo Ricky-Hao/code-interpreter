@@ -201,7 +201,7 @@ if timeout 10 /usr/local/bin/sandbox-supervisor-policy "${NSJAIL_PATH:-/usr/sbin
     --user "65534:${SMOKE_OUTSIDE_UID}:1" --group "65534:${SMOKE_OUTSIDE_GID}:1" \
     -s /usr/bin:/bin -s /usr/lib:/lib -s /usr/lib64:/lib64 \
     -B "$SMOKE_DIR:/mnt/data" \
-    -- /bin/sh -c 'printf "%s\n" sandbox_ok > /mnt/data/smoke.txt && test "$(cat /mnt/data/smoke.txt)" = sandbox_ok' > /dev/null 2>"$SMOKE_STDERR"; then
+    -- /bin/sh -c 'getent passwd 65534 >/dev/null && getent group 65534 >/dev/null && test -d /etc/apt/sources.list.d && test -d /etc/apt/trusted.gpg.d && test -r /var/lib/dpkg/status && printf "%s\n" sandbox_ok > /mnt/data/smoke.txt && test "$(cat /mnt/data/smoke.txt)" = sandbox_ok' > /dev/null 2>"$SMOKE_STDERR"; then
     echo "NsJail smoke test passed"
 else
     echo "FATAL: NsJail smoke test failed — sandbox cannot start"

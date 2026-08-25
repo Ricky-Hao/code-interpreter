@@ -15,6 +15,7 @@ import {
   compatibilityModeForSkippedChown,
   createSandboxWorkspace,
   createWorkspaceId,
+  ensureUnprivilegedPingGroupRange,
   ensureSessionWorkspace,
   prepareWorkspaceRoot,
   quarantineModeForUid,
@@ -103,6 +104,40 @@ describe('sandbox UID slot pool', () => {
     expect(pool.acquire()).not.toBeNull();
     expect(pool.acquire()).not.toBeNull();
     expect(pool.acquire()).toBeNull();
+  });
+});
+
+describe('sandbox ping group range', () => {
+  test('replaces a non-covering range with the mapped per-job GIDs', async () => {
+    const root = await mkroot('ping-group-range-');
+    const rangePath = path.join(root, 'ping_group_range');
+    await fsp.writeFile(rangePath, '65534\t65534\n');
+
+    const result = await ensureUnprivilegedPingGroupRange({
+      path: rangePath,
+      perJobUids: true,
+      gidBase: 200000,
+      gidCount: 2,
+    });
+
+    expect(result).toEqual({ min: 200000, max: 200001, changed: true });
+    expect(await fsp.readFile(rangePath, 'utf8')).toBe('200000 200001\n');
+  });
+
+  test('keeps an existing range that already covers every job GID', async () => {
+    const root = await mkroot('ping-group-range-existing-');
+    const rangePath = path.join(root, 'ping_group_range');
+    await fsp.writeFile(rangePath, '0 2147483647\n');
+
+    const result = await ensureUnprivilegedPingGroupRange({
+      path: rangePath,
+      perJobUids: true,
+      gidBase: 200000,
+      gidCount: 2,
+    });
+
+    expect(result).toEqual({ min: 0, max: 2147483647, changed: false });
+    expect(await fsp.readFile(rangePath, 'utf8')).toBe('0 2147483647\n');
   });
 });
 
