@@ -880,6 +880,10 @@ export class Job {
     return this.jobIdentity ?? fallbackSandboxIdentity();
   }
 
+  private createDependencyWorkspace(): Promise<SandboxWorkspaceLease> {
+    return createSandboxWorkspace(this.sandboxIdentity());
+  }
+
   private async applySandboxFilePermissions(
     filePath: string,
     noFollow = false,
@@ -1010,7 +1014,7 @@ export class Job {
     this.submissionDir = this.workspaceLease.dir;
     await removeDependencyNodeModulesSymlink(this.submissionDir);
 
-    this.dependencyWorkspaceLease = await createSandboxWorkspace(this.jobIdentity);
+    this.dependencyWorkspaceLease = await this.createDependencyWorkspace();
     const dependencyRoot = this.dependencyWorkspaceLease.dir;
     for (const relativeDir of [
       'tmp',

@@ -22,6 +22,7 @@ import { SANDBOX_DEPENDENCY_MOUNT } from './nsjail';
 interface CleanupInternals {
   jobIdentity?: SandboxJobIdentity;
   dependencyWorkspaceLease?: SandboxWorkspaceLease;
+  createDependencyWorkspace(): Promise<SandboxWorkspaceLease>;
 }
 
 interface MarkerInternals {
@@ -63,6 +64,17 @@ function asCleanupInternals(job: Job): CleanupInternals {
   return job as unknown as CleanupInternals;
 }
 
+async function stubDependencyWorkspace(job: Job, identity: SandboxJobIdentity): Promise<string> {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'job-dependencies-'));
+  const lease: SandboxWorkspaceLease = {
+    workspaceId: path.basename(dir),
+    dir,
+    identity,
+  };
+  asCleanupInternals(job).createDependencyWorkspace = async () => lease;
+  return dir;
+}
+
 describe('Job cleanup', () => {
   test('keeps dependencies outside the session tree and removes them at job cleanup', async () => {
     const workspace = await fsp.mkdtemp(path.join(os.tmpdir(), 'prime-dependencies-'));
@@ -97,18 +109,17 @@ describe('Job cleanup', () => {
       memory_limits: { compile: 100_000_000, run: 100_000_000 },
       session,
     });
+    const dependencyDir = await stubDependencyWorkspace(job, identity);
 
-    let dependencyDir: string | undefined;
     try {
       await job.prime();
-      dependencyDir = asCleanupInternals(job).dependencyWorkspaceLease?.dir;
-      expect(dependencyDir).toBeDefined();
-      expect(path.relative(workspace, dependencyDir!).startsWith('..')).toBe(true);
+      expect(asCleanupInternals(job).dependencyWorkspaceLease?.dir).toBe(dependencyDir);
+      expect(path.relative(workspace, dependencyDir).startsWith('..')).toBe(true);
       expect(await fsp.lstat(path.join(workspace, 'node_modules')).catch(() => null)).toBeNull();
-      expect((await fsp.lstat(path.join(dependencyDir!, 'tmp'))).isDirectory()).toBe(true);
-      expect((await fsp.lstat(path.join(dependencyDir!, '.cache'))).isDirectory()).toBe(true);
-      expect((await fsp.lstat(path.join(dependencyDir!, 'bin'))).isDirectory()).toBe(true);
-      await fsp.writeFile(path.join(dependencyDir!, 'installed-package.py'), 'temporary');
+      expect((await fsp.lstat(path.join(dependencyDir, 'tmp'))).isDirectory()).toBe(true);
+      expect((await fsp.lstat(path.join(dependencyDir, '.cache'))).isDirectory()).toBe(true);
+      expect((await fsp.lstat(path.join(dependencyDir, 'bin'))).isDirectory()).toBe(true);
+      await fsp.writeFile(path.join(dependencyDir, 'installed-package.py'), 'temporary');
       await fsp.symlink(
         `${SANDBOX_DEPENDENCY_MOUNT}/js/node_modules`,
         path.join(workspace, 'node_modules'),
@@ -116,12 +127,13 @@ describe('Job cleanup', () => {
 
       await job.cleanup();
 
-      expect(await fsp.lstat(dependencyDir!).catch(() => null)).toBeNull();
+      expect(await fsp.lstat(dependencyDir).catch(() => null)).toBeNull();
       expect(await fsp.lstat(path.join(workspace, 'node_modules')).catch(() => null)).toBeNull();
       expect((await fsp.lstat(workspace)).isDirectory()).toBe(true);
     } finally {
       await job.cleanup();
       await fsp.rm(workspace, { recursive: true, force: true });
+      await fsp.rm(dependencyDir, { recursive: true, force: true });
     }
   });
 
@@ -177,6 +189,7 @@ describe('Job cleanup', () => {
       memory_limits: { compile: 100_000_000, run: 100_000_000 },
       session,
     });
+    const dependencyDir = await stubDependencyWorkspace(job, identity);
     type PrimeContext = {
       submissionDir: string;
       identity: SandboxJobIdentity;
@@ -205,7 +218,9 @@ describe('Job cleanup', () => {
       await job.cleanup();
       expect(await fsp.lstat(path.join(process.cwd(), 'slow-sibling.txt')).catch(() => null)).toBeNull();
     } finally {
+      await job.cleanup();
       await fsp.rm(workspace, { recursive: true, force: true });
+      await fsp.rm(dependencyDir, { recursive: true, force: true });
     }
   });
 
@@ -242,6 +257,7 @@ describe('Job cleanup', () => {
       memory_limits: { compile: 100_000_000, run: 100_000_000 },
       session,
     });
+    const dependencyDir = await stubDependencyWorkspace(job, identity);
     const internals = job as unknown as {
       writeFile(file: TFile): Promise<void>;
     };
@@ -261,6 +277,7 @@ describe('Job cleanup', () => {
     } finally {
       await job.cleanup();
       await fsp.rm(workspace, { recursive: true, force: true });
+      await fsp.rm(dependencyDir, { recursive: true, force: true });
     }
   });
 
