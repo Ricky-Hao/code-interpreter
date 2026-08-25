@@ -45,6 +45,34 @@ describe('NsJail args', () => {
     ].join('\n'));
   });
 
+  test('provides only the fixed sandbox UID and GID identity', async () => {
+    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+    expect(cfg).toContain('src_content: "sandbox:x:65534:65534:Sandbox user:/mnt/data:/bin/sh\\n"');
+    expect(cfg).toContain('src_content: "sandbox:x:65534:\\n"');
+    expect(cfg).not.toContain('root:x:0:0:');
+  });
+
+  test('mounts only immutable APT inputs and package status read-only', async () => {
+    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+    for (const source of [
+      '/etc/apt/sources.list',
+      '/etc/apt/sources.list.d',
+      '/etc/apt/trusted.gpg',
+      '/etc/apt/trusted.gpg.d',
+      '/var/lib/dpkg/status',
+    ]) {
+      expect(cfg).toContain([
+        'mount {',
+        `    src: "${source}"`,
+        `    dst: "${source}"`,
+        '    is_bind: true',
+        '    rw: false',
+      ].join('\n'));
+    }
+    expect(cfg).not.toContain('src: "/etc/apt"');
+    expect(cfg).not.toContain('src: "/var/lib/dpkg"');
+  });
+
   test('shares networking and mounts the resolver only when networking is enabled', () => {
     const originalDisableNetworking = config.disable_networking;
     const options = {

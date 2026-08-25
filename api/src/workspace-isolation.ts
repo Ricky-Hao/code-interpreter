@@ -123,6 +123,54 @@ export function assertWorkspaceIsolationConfig(): void {
   }
 }
 
+export async function ensureUnprivilegedPingGroupRange(args: {
+  path?: string;
+  perJobUids?: boolean;
+  gidBase?: number;
+  gidCount?: number;
+} = {}): Promise<{ min: number; max: number; changed: boolean }> {
+  const rangePath = args.path ?? '/proc/sys/net/ipv4/ping_group_range';
+  const perJobUids = args.perJobUids ?? config.per_job_uids;
+  const gidBase = args.gidBase ?? config.job_gid_base;
+  const gidCount = args.gidCount ?? config.job_uid_count;
+  const desiredMin = perJobUids ? gidBase : SANDBOX_INSIDE_GID;
+  const desiredMax = perJobUids ? gidBase + gidCount - 1 : SANDBOX_INSIDE_GID;
+
+  const parseRange = (value: string): { min: number; max: number } => {
+    const match = value.match(/^\s*(\d+)\s+(\d+)\s*$/);
+    if (!match) {
+      throw new SandboxWorkspaceIsolationError(`Invalid ping group range in ${rangePath}`);
+    }
+    return { min: Number(match[1]), max: Number(match[2]) };
+  };
+
+  let current: { min: number; max: number };
+  try {
+    current = parseRange(await fsp.readFile(rangePath, 'utf8'));
+  } catch (error) {
+    if (error instanceof SandboxWorkspaceIsolationError) throw error;
+    throw new SandboxWorkspaceIsolationError(`Unable to read ping group range from ${rangePath}`);
+  }
+  if (current.min <= desiredMin && current.max >= desiredMax) {
+    return { min: current.min, max: current.max, changed: false };
+  }
+
+  try {
+    await fsp.writeFile(rangePath, `${desiredMin} ${desiredMax}\n`);
+  } catch {
+    throw new SandboxWorkspaceIsolationError(
+      `Unable to allow ping sockets for sandbox GIDs ${desiredMin}-${desiredMax}`,
+    );
+  }
+  const verified = parseRange(await fsp.readFile(rangePath, 'utf8'));
+  if (verified.min > desiredMin || verified.max < desiredMax) {
+    throw new SandboxWorkspaceIsolationError(
+      `Kernel ping group range does not cover sandbox GIDs ${desiredMin}-${desiredMax}`,
+    );
+  }
+  return { min: verified.min, max: verified.max, changed: true };
+}
+
 export class SandboxJobUidPool {
   private readonly availableSlots: number[];
   private readonly activeSlots = new Set<number>();
@@ -553,9 +601,10 @@ export async function initializeSandboxWorkspaceIsolation(): Promise<void> {
   assertWorkspaceIsolationConfig();
   if (config.per_job_uids) assertWorkspaceOwnershipCapability();
   await assertNsJailConfigHasNoStaticUidMaps(config.nsjail_config);
+  const pingGroupRange = await ensureUnprivilegedPingGroupRange();
   await prepareWorkspaceRoot();
   const removed = await reapStaleWorkspaces({ removeAll: true });
-  logger.info({ root: SANDBOX_WORKSPACE_ROOT, removed }, 'Sandbox workspace isolation initialized');
+  logger.info({ root: SANDBOX_WORKSPACE_ROOT, removed, pingGroupRange }, 'Sandbox workspace isolation initialized');
 }
 
 export function startWorkspaceReaper(): () => void {
