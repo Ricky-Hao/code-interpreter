@@ -182,7 +182,11 @@ start_resolver_relay() {
 
 LOOPBACK_NAMESERVER="$(loopback_nameserver /etc/resolv.conf)"
 RESOLVER_RELAY_ADDRESS=''
-if [ -n "$LOOPBACK_NAMESERVER" ]; then
+if [ "${LAUNCHER_NETWORK_BACKEND:-tsi}" = passt ]; then
+    # Passt supplies DNS over its per-VM DHCP lease before API startup. Keep the
+    # boot handoff valid but do not start shared port-53 relays for every VM.
+    RESOLVER_RELAY_ADDRESS="$LOOPBACK_NAMESERVER"
+elif [ -n "$LOOPBACK_NAMESERVER" ]; then
     RESOLVER_RELAY_ADDRESS="$(runner_address)"
     if [ -z "$RESOLVER_RELAY_ADDRESS" ]; then
         echo "ERROR: runner has no non-loopback IPv4 address to relay loopback resolver $LOOPBACK_NAMESERVER" >&2
@@ -197,7 +201,7 @@ if [[ "$RESOLV_FIELD_SEPARATOR$SANDBOX_RESOLV_CONF" != *"${RESOLV_FIELD_SEPARATO
     exit 1
 fi
 
-if [ -n "$LOOPBACK_NAMESERVER" ]; then
+if [ -n "$LOOPBACK_NAMESERVER" ] && [ "${LAUNCHER_NETWORK_BACKEND:-tsi}" != passt ]; then
     start_resolver_relay "$LOOPBACK_NAMESERVER" "$RESOLVER_RELAY_ADDRESS"
 fi
 

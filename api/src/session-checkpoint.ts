@@ -38,7 +38,7 @@ const CHECKPOINT_CONTROL_FILE = '.codeapi-checkpoint-control.v2.json';
  * surfaced-output signatures be dropped; primed state is never discarded. */
 const CHECKPOINT_CONTROL_MAX_BYTES = 16 * 1024 * 1024;
 
-export class SessionCheckpointError extends Error {}
+export class SessionCheckpointError extends Error { }
 
 function currentUid(): number | undefined {
   return typeof process.getuid === 'function' ? process.getuid() : undefined;
@@ -148,7 +148,7 @@ export async function streamSessionCheckpoint(
      * below rejects first and we never reach `await closed` — an unobserved
      * rejection would then take the whole runner down after we already
      * answered 500. The later `await closed` still sees the same rejection. */
-    closed.catch(() => {});
+    closed.catch(() => { });
     try {
       await pipeline(
         tar.stdout,
@@ -171,7 +171,7 @@ export async function streamSessionCheckpoint(
        * tar is still writing. Terminate and reap it so no child or temp-stage
        * lifetime escapes the failed request. */
       if (tar.exitCode === null && tar.signalCode === null) tar.kill('SIGKILL');
-      await closed.catch(() => {});
+      await closed.catch(() => { });
       throw error;
     }
   } catch (error) {
@@ -180,7 +180,7 @@ export async function streamSessionCheckpoint(
     else res.destroy();
   } finally {
     if (controlStage) {
-      await fsp.rm(controlStage, { recursive: true, force: true }).catch(() => {});
+      await fsp.rm(controlStage, { recursive: true, force: true }).catch(() => { });
     }
   }
 }
@@ -271,7 +271,7 @@ export async function restoreSessionCheckpoint(
       tar.on('error', reject);
     });
     /* Observe immediately: a spawn failure may reject the input pipeline first. */
-    closed.catch(() => {});
+    closed.catch(() => { });
     try {
       /* Register the 'close' listener before awaiting the pipeline (see the
        * create side): a small upload can finish and 'close' can fire before
@@ -287,7 +287,7 @@ export async function restoreSessionCheckpoint(
       if (code !== 0) throw new SessionCheckpointError(`restore tar exited ${code}`);
     } catch (error) {
       if (tar.exitCode === null && tar.signalCode === null) tar.kill('SIGKILL');
-      await closed.catch(() => {});
+      await closed.catch(() => { });
       throw error;
     }
 
@@ -375,7 +375,7 @@ export async function restoreSessionCheckpoint(
     if (!res.headersSent) res.status(500).json({ message: 'restore failed' });
   } finally {
     if (!retainStageForRecovery) {
-      await fsp.rm(restoreStage, { recursive: true, force: true }).catch(() => {});
+      await fsp.rm(restoreStage, { recursive: true, force: true }).catch(() => { });
     }
   }
 }
@@ -452,7 +452,7 @@ async function readRestoredMeta(
     }
     const parsed = JSON.parse(await fsp.readFile(metaPath, 'utf8')) as unknown;
     if (isSessionMetaSnapshot(parsed)) {
-      await fsp.rm(metaPath, { force: true }).catch(() => {});
+      await fsp.rm(metaPath, { force: true }).catch(() => { });
       return parsed;
     } else if (
       typeof (parsed as { marker?: unknown })?.marker === 'string' &&
@@ -466,7 +466,7 @@ async function readRestoredMeta(
         { marker: (parsed as { marker: string }).marker, expected: SESSION_META_MARKER },
         'Ignoring incompatible session checkpoint metadata',
       );
-      await fsp.rm(metaPath, { force: true }).catch(() => {});
+      await fsp.rm(metaPath, { force: true }).catch(() => { });
     }
   } catch (error) {
     logger.debug({ err: error }, 'No session meta sidecar to restore');

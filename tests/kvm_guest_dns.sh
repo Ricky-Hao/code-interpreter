@@ -228,6 +228,12 @@ fi
 grep -q 'no non-loopback IPv4 address to relay loopback resolver 127.0.0.11' "$TEST_DIR/entrypoint-error"
 [[ ! -e "$TEST_DIR/forwarded" && ! -e "$TEST_DIR/socat-calls" ]]
 
+# Passt owns per-VM DHCP/DNS: concurrent VM launchers must not compete for the
+# shared TSI relay port. The guest validates DHCP before accepting API traffic.
+LAUNCHER_NETWORK_BACKEND=passt run_entrypoint "$TEST_DIR/docker-resolv.conf" "$TEST_DIR/proc-net-unbound"
+[[ "$(cat "$TEST_DIR/forwarded")" == *'nameserver 127.0.0.11'* ]]
+[[ ! -e "$TEST_DIR/socat-calls" ]]
+
 # Kubernetes resolvers: tabs, CRLF, trailing spaces, and unknown keywords are
 # normalized away; search domains and options survive intact.
 printf 'nameserver\t10.96.0.10  \r\nsearch   tenant.svc.cluster.local svc.cluster.local cluster.local\n; resolver comment\nlookup file bind\noptions ndots:5\n' > "$TEST_DIR/k8s-resolv.conf" # leak-check:allow
@@ -261,7 +267,7 @@ python3 - "$ROOT" <<'PY'
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
-for name, count in [('api/Dockerfile', 2), ('docker/Dockerfile.worker-sandbox', 2), ('launcher/Dockerfile', 1)]:
+for name, count in [('api/Dockerfile', 3), ('docker/Dockerfile.worker-sandbox', 2), ('launcher/Dockerfile', 1)]:
     text = (root / name).read_text()
     assert text.count('--prepare-rootfs /sandbox-rootfs') == count, name
     assert 'COPY api/src/guest-dns.sh ./guest-dns.sh' in text, name

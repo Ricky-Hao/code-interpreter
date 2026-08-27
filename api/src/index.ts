@@ -10,11 +10,13 @@ import { startWarmupCommand } from './warmup';
 import { hostedAppSupervisor, validateHostedAppStartup } from './hosted-app';
 import v2Router from './api/v2';
 import lifecycleRouter, { LIFECYCLE_HOOK_BASE_PATH } from './api/lifecycle';
+import { validateVmControlAuthStartup, vmControlAuthMiddleware } from './vm-control-auth';
 
 const app = express();
 
 app.use(traceHttpRequest('codeapi.sandbox_runner.request'));
 app.use(httpMetricsMiddleware);
+app.use(vmControlAuthMiddleware);
 app.use(express.urlencoded({ extended: true }));
 /** No global `express.json()` is registered here on purpose. A global parser
  * runs *before* any route-level middleware, so its limit is the effective
@@ -67,6 +69,7 @@ app.use((err: HttpError, _req: express.Request, res: express.Response, _next: ex
 
 async function main(): Promise<void> {
   validateHostedAppStartup();
+  validateVmControlAuthStartup();
   validateHardenedSandboxStartup();
   await initializeSandboxWorkspaceIsolation();
   await startWarmupCommand();

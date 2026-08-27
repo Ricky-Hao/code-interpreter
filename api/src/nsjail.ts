@@ -95,7 +95,7 @@ const archSpecificLowPrioritySyscalls = process.arch === 'arm64'
   : '    ioperm, iopl, modify_ldt, lookup_dcookie,';
 
 function buildSeccompPolicy(): string {
-const deniedSocketFamilies = config.disable_networking
+const deniedSocketFamilies = config.disable_networking && !config.full_debian_mode
   ? 'domain != AF_VSOCK'
   : 'domain != AF_VSOCK && domain != AF_INET && domain != AF_INET6';
 return [
@@ -203,6 +203,19 @@ export { SIGNALS };
 
 export const SANDBOX_DEPENDENCY_MOUNT = '/mnt/deps';
 
+const FULL_DEBIAN_WRITABLE_MOUNTS = [
+  '/usr',
+  '/etc',
+  '/var',
+  '/opt',
+  '/root',
+  '/home',
+  '/srv',
+  '/boot',
+  '/media',
+  '/run',
+];
+
 /* Base sandbox.cfg cached at module load. Per-job runs append a dynamic
  * /mnt/data mount block (see renderJobConfigOverlay) so the bind can carry
  * noexec/nosuid/nodev — flags NsJail's CLI -B form does not accept. */
@@ -235,7 +248,7 @@ export function renderJobConfigOverlay(submissionDir: string, dependencyDir: str
     '    dst: "/mnt/data"',
     '    is_bind: true',
     '    rw: true',
-    '    noexec: true',
+    ...(config.full_debian_mode ? [] : ['    noexec: true']),
     '    nosuid: true',
     '    nodev: true',
     '}',
@@ -707,18 +720,40 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
   } = opts;
 
   const timeoutSecs = Math.max(1, Math.ceil(timeout / 1000));
+  const insideUid = config.full_debian_mode ? 0 : SANDBOX_INSIDE_UID;
+  const insideGid = config.full_debian_mode ? 0 : SANDBOX_INSIDE_GID;
+  const outsideUid = config.full_debian_mode ? 0 : identity.uid;
+  const outsideGid = config.full_debian_mode ? 0 : identity.gid;
+  const identityCount = config.full_debian_mode ? 65536 : 1;
 
   const args: string[] = [
     '--config', cfgPath ?? config.nsjail_config,
     '--log', logPath,
     '--seccomp_string', buildSeccompPolicy(),
-    '--user', `${SANDBOX_INSIDE_UID}:${identity.uid}:1`,
-    '--group', `${SANDBOX_INSIDE_GID}:${identity.gid}:1`,
+    '--user', `${insideUid}:${outsideUid}:${identityCount}`,
+    '--group', `${insideGid}:${outsideGid}:${identityCount}`,
     '-s', '/usr/bin:/bin',
     '-s', '/usr/lib:/lib',
     '-s', '/usr/lib64:/lib64',
     '-R', `${pkgdir}:${pkgdir}`,
   ];
+
+  if (config.full_debian_mode) {
+    args.push('--keep_caps');
+    for (const [source, destination] of [
+      ['/usr/sbin', '/sbin'],
+      ['/dev/pts/ptmx', '/dev/ptmx'],
+      ['/proc/self/fd', '/dev/fd'],
+      ['/proc/self/fd/0', '/dev/stdin'],
+      ['/proc/self/fd/1', '/dev/stdout'],
+      ['/proc/self/fd/2', '/dev/stderr'],
+    ]) {
+      args.push('-s', `${source}:${destination}`);
+    }
+    for (const mount of FULL_DEBIAN_WRITABLE_MOUNTS) {
+      args.push('-B', `${mount}:${mount}`);
+    }
+  }
 
   if (config.use_cgroupv2) {
     args.push('--use_cgroupv2');
@@ -726,8 +761,10 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
 
   if (!config.disable_networking) {
     args.push('--disable_clone_newnet');
-    args.push('-R', '/tmp/codeapi-resolv.conf:/etc/resolv.conf');
+    args.push(config.full_debian_mode ? '-B' : '-R', '/tmp/codeapi-resolv.conf:/etc/resolv.conf');
   }
+  // Full Debian keeps a private network namespace when egress is disabled;
+  // Internet-family sockets then serve only the jail's own loopback device.
 
   if (extraPkgdirs) {
     const packagesRoot = config.packages_directory;
@@ -768,6 +805,9 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
   for (const [key, value] of Object.entries(envVars)) {
     args.push('-E', `${key}=${value}`);
   }
+  // glibc otherwise batches A/AAAA queries through denied sendmmsg. Apply last
+  // so user environment cannot accidentally break the supervisor DNS contract.
+  args.push('-E', `RES_OPTIONS=${envVars.RES_OPTIONS ? `${envVars.RES_OPTIONS} ` : ''}single-request`);
 
   args.push('--', '/usr/local/bin/spec-guard');
   if (enableToolCallPipes === true) args.push('--tool-call-pipes');
