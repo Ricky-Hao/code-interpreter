@@ -9,7 +9,13 @@ if [ ! -d "$rootfs" ]; then
     exit 1
 fi
 
-mkdir -p "$rootfs/dev" "$rootfs/proc" "$rootfs/sys" "$rootfs/tmp" "$rootfs/run" "$rootfs/mnt"
+mkdir -p \
+    "$rootfs/dev" \
+    "$rootfs/proc" \
+    "$rootfs/sys" \
+    "$rootfs/tmp" \
+    "$rootfs/run" \
+    "$rootfs/mnt/codeapi-overlay"
 chmod 1777 "$rootfs/tmp"
 
 used_kib=$(du -sk "$rootfs" | awk '{print $1}')

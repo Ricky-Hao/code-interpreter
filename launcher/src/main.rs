@@ -28,6 +28,14 @@ mod ffi {
             c_tag: *const c_char,
             c_path: *const c_char,
         ) -> i32;
+        pub fn krun_add_net_unixstream(
+            ctx_id: u32,
+            c_path: *const c_char,
+            fd: c_int,
+            c_mac: *mut u8,
+            features: u32,
+            flags: u32,
+        ) -> i32;
         pub fn krun_set_port_map(ctx_id: u32, port_map: *const *const c_char) -> i32;
         pub fn krun_set_exec(
             ctx_id: u32,
@@ -404,6 +412,13 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+fn port_map(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "2000:2000".into())
+}
+
 fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
     const ALLOW_EXACT: &[&str] = &[
         "CODEAPI_HARDENED_SANDBOX_MODE",
@@ -424,6 +439,7 @@ fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
         "SANDBOX_EXECUTE_BODY_LIMIT",
         "SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY",
         "SANDBOX_FORWARD_TARGET",
+        "SANDBOX_FULL_DEBIAN_MODE",
         "SANDBOX_LIMIT_OVERRIDES",
         "SANDBOX_LOG_LEVEL",
         "SANDBOX_MAX_CONCURRENT_JOBS",
@@ -435,7 +451,9 @@ fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
         "SANDBOX_PACKAGES_DIRECTORY",
         "SANDBOX_MAX_PROCESS_COUNT",
         "SANDBOX_OUTPUT_MAX_SIZE",
+        "SANDBOX_PER_JOB_UIDS",
         "SANDBOX_REQUIRE_EGRESS_MANIFEST",
+        "SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP",
         "SANDBOX_RESOLV_CONF_B64",
         "SANDBOX_RLIMIT_AS",
         "SANDBOX_RLIMIT_FSIZE",
@@ -444,6 +462,7 @@ fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
         "SANDBOX_RUN_TIMEOUT",
         "SANDBOX_UPLOAD_CONCURRENCY",
         "SANDBOX_USE_CGROUPV2",
+        "SANDBOX_VM_CONTROL_TOKEN",
         "TERM",
         "TMPDIR",
         "TZ",
@@ -494,6 +513,10 @@ fn main() {
     let root_device = non_empty_env("LAUNCHER_ROOT_DEVICE").unwrap_or_else(|| "/dev/vda".into());
     let root_fstype = non_empty_env("LAUNCHER_ROOT_FSTYPE").unwrap_or_else(|| "ext4".into());
     let root_options = non_empty_env("LAUNCHER_ROOT_OPTIONS").unwrap_or_else(|| "ro".into());
+    let scratch_disk = non_empty_env("LAUNCHER_SCRATCH_DISK");
+    let port_map = port_map(non_empty_env("LAUNCHER_PORT_MAP"));
+    let network_backend = non_empty_env("LAUNCHER_NETWORK_BACKEND").unwrap_or_else(|| "tsi".into());
+    let passt_socket = non_empty_env("LAUNCHER_PASST_SOCKET");
     let exec_path = env::var("LAUNCHER_EXEC").unwrap_or_else(|_| "/sandbox_api/entrypoint.sh".into());
     let log_level: u32 = env::var("LAUNCHER_LOG_LEVEL")
         .ok()
@@ -519,9 +542,10 @@ fn main() {
     let root_device_c = cstr(&root_device);
     let root_fstype_c = cstr(&root_fstype);
     let root_options_c = cstr(&root_options);
+    let scratch_disk_c = scratch_disk.as_ref().map(|value| cstr(value));
     let exec_c = cstr(&exec_path);
 
-    let port_map_strs = vec![cstr("2000:2000")];
+    let port_map_strs = vec![cstr(&port_map)];
     let port_map_ptrs = null_term(&port_map_strs);
 
     let egress_gateway_enabled = env::var("EGRESS_GATEWAY_URL")
@@ -578,6 +602,20 @@ fn main() {
             ffi::check("set_root", ffi::krun_set_root(ctx, rootfs_c.as_ptr()));
         }
 
+        if let Some(scratch_disk_c) = &scratch_disk_c {
+            let block_id = cstr("scratch");
+            ffi::check(
+                "add_scratch_disk",
+                ffi::krun_add_disk(
+                    ctx,
+                    block_id.as_ptr(),
+                    scratch_disk_c.as_ptr(),
+                    false,
+                ),
+            );
+            eprintln!("[launcher] Attached writable scratch disk: {}", scratch_disk.as_deref().unwrap());
+        }
+
         if std::path::Path::new(&packages_host).exists() {
             let tag = cstr("packages");
             let path = cstr(&packages_host);
@@ -585,8 +623,33 @@ fn main() {
             eprintln!("[launcher] Mounted {packages_host} as virtio-fs 'packages'");
         }
 
-        ffi::check("set_port_map", ffi::krun_set_port_map(ctx, port_map_ptrs.as_ptr()));
-        eprintln!("[launcher] Port map: 2000:2000");
+        if network_backend == "passt" {
+            let socket_path = passt_socket.as_deref().unwrap_or_else(|| {
+                eprintln!("[launcher] LAUNCHER_PASST_SOCKET is required for passt networking");
+                process::exit(1);
+            });
+            let socket_path_c = cstr(socket_path);
+            let mut mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+            const COMPAT_NET_FEATURES: u32 = (1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14);
+            ffi::check(
+                "add_net_unixstream",
+                ffi::krun_add_net_unixstream(
+                    ctx,
+                    socket_path_c.as_ptr(),
+                    -1,
+                    mac.as_mut_ptr(),
+                    COMPAT_NET_FEATURES,
+                    0,
+                ),
+            );
+            eprintln!("[launcher] Passt networking: socket={socket_path} port_map={port_map}");
+        } else if network_backend == "tsi" {
+            ffi::check("set_port_map", ffi::krun_set_port_map(ctx, port_map_ptrs.as_ptr()));
+            eprintln!("[launcher] TSI port map: {port_map}");
+        } else {
+            eprintln!("[launcher] unsupported network backend {network_backend:?}");
+            process::exit(1);
+        }
 
         ffi::check(
             "set_exec",
@@ -612,7 +675,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_nofile_soft_limit, guest_nofile_rlimit, is_allowed_guest_env_key};
+    use super::{desired_nofile_soft_limit, guest_nofile_rlimit, is_allowed_guest_env_key, port_map};
+
+    #[test]
+    fn port_map_defaults_to_existing_mapping() {
+        assert_eq!(port_map(None), "2000:2000");
+        assert_eq!(port_map(Some("   ".into())), "2000:2000");
+    }
+
+    #[test]
+    fn port_map_accepts_manager_assigned_host_port() {
+        assert_eq!(port_map(Some("21017:2000".into())), "21017:2000");
+    }
 
     #[test]
     fn guest_env_allowlist_blocks_control_plane_and_secret_vars() {
@@ -632,6 +706,9 @@ mod tests {
             "MINIO_ROOT_PASSWORD",
             "CODEAPI_JWT_SECRET",
             "TOOL_CALL_SERVER_URL",
+            "SANDBOX_JOB_UID_BASE",
+            "SANDBOX_JOB_GID_BASE",
+            "SANDBOX_JOB_UID_COUNT",
             "SANDBOX_UNDECLARED_KNOB",
         ] {
             assert!(!is_allowed_guest_env_key(key, true), "{key} should not enter the sandbox guest");
@@ -649,6 +726,8 @@ mod tests {
             "SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY",
             "SANDBOX_RESOLV_CONF_B64",
             "SANDBOX_RUN_TIMEOUT",
+            "SANDBOX_PER_JOB_UIDS",
+            "SANDBOX_VM_CONTROL_TOKEN",
             "NSJAIL_CONFIG",
             "PORT",
             "PATH",

@@ -121,6 +121,61 @@ describe('NsJail args', () => {
     expect(valueAfter(args, '--group')).toBe('65534:300002:1');
   });
 
+  test('full Debian mode runs as guest root with writable system mounts', () => {
+    const originalFullDebianMode = config.full_debian_mode;
+    const originalDisableNetworking = config.disable_networking;
+    config.full_debian_mode = true;
+    config.disable_networking = false;
+    try {
+      const args = buildArgs({
+        logPath: '/tmp/nsjail-test.log',
+        pkgdir: '/pkgs/bash/5.2.0',
+        timeout: 1000,
+        memoryLimit: -1,
+        envVars: {},
+        command: ['/bin/bash', '/pkgs/bash/5.2.0/run', 'main.sh'],
+        identity: { slot: 0, uid: 200000, gid: 200000, perJobUid: true },
+      });
+
+      expect(valueAfter(args, '--user')).toBe('0:0:65536');
+      expect(valueAfter(args, '--group')).toBe('0:0:65536');
+      expect(args).toContain('--keep_caps');
+      for (const symlink of [
+        '/usr/sbin:/sbin',
+        '/dev/pts/ptmx:/dev/ptmx',
+        '/proc/self/fd:/dev/fd',
+        '/proc/self/fd/0:/dev/stdin',
+        '/proc/self/fd/1:/dev/stdout',
+        '/proc/self/fd/2:/dev/stderr',
+      ]) {
+        expect(hasArgPair(args, '-s', symlink)).toBe(true);
+      }
+      for (const mount of ['/usr', '/etc', '/var', '/opt', '/root', '/home', '/srv', '/run']) {
+        expect(hasArgPair(args, '-B', `${mount}:${mount}`)).toBe(true);
+      }
+      expect(hasArgPair(args, '-B', '/tmp/codeapi-resolv.conf:/etc/resolv.conf')).toBe(true);
+      expect(hasArgPair(args, '-R', '/tmp/codeapi-resolv.conf:/etc/resolv.conf')).toBe(false);
+
+      const overlay = renderJobConfigOverlay('/tmp/submission', '/tmp/dependencies');
+      expect(overlay).not.toContain('    noexec: true');
+    } finally {
+      config.full_debian_mode = originalFullDebianMode;
+      config.disable_networking = originalDisableNetworking;
+    }
+  });
+
+  test('provides private PTYs, shared memory, and standard random devices', async () => {
+    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+
+    expect(cfg).toContain('dst: "/dev/pts"');
+    expect(cfg).toContain('fstype: "devpts"');
+    expect(cfg).toContain('options: "newinstance,ptmxmode=0666,mode=0620,gid=5"');
+    expect(cfg).toContain('src: "/dev/random"');
+    expect(cfg).toContain('dst: "/dev/tty"');
+    expect(cfg).toContain('dst: "/dev/shm"');
+    expect(cfg).toContain('options: "size=64m,mode=1777"');
+  });
+
   test('does not bind /mnt/data via -B (the per-job cfg overlay handles it with noexec)', () => {
     /* Regression guard: the dynamic /mnt/data bind used to be `-B
      * <submissionDir>:/mnt/data` on the CLI, which NsJail accepts but has
@@ -495,12 +550,14 @@ describe('NsJail seccomp policy', () => {
 
   test('allows only route and socket-diagnostic netlink protocols when networking is enabled', () => {
     const originalDisableNetworking = config.disable_networking;
+    const originalFullDebianMode = config.full_debian_mode;
     const socketRule = () => {
       const errnoBlock = seccompPolicy().split('ERRNO(1)')[1] ?? '';
       return errnoBlock.split('\n').find(line => line.includes('socket(domain, sock_type, protocol)')) ?? '';
     };
 
     try {
+      config.full_debian_mode = false;
       config.disable_networking = true;
       expect(socketRule()).toContain('domain == AF_NETLINK ||');
       expect(socketRule()).not.toContain('protocol != NETLINK_ROUTE');
@@ -513,6 +570,31 @@ describe('NsJail seccomp policy', () => {
       expect(seccompPolicy()).toContain('#define NETLINK_SOCK_DIAG 4');
     } finally {
       config.disable_networking = originalDisableNetworking;
+      config.full_debian_mode = originalFullDebianMode;
+    }
+  });
+
+  test('allows audit netlink only in full Debian mode', () => {
+    const originalDisableNetworking = config.disable_networking;
+    const originalFullDebianMode = config.full_debian_mode;
+    const socketRule = () => {
+      const errnoBlock = seccompPolicy().split('ERRNO(1)')[1] ?? '';
+      return errnoBlock.split('\n').find(line => line.includes('socket(domain, sock_type, protocol)')) ?? '';
+    };
+
+    try {
+      config.full_debian_mode = true;
+      config.disable_networking = true;
+      expect(socketRule()).toContain(
+        '(domain == AF_NETLINK && protocol != NETLINK_AUDIT)',
+      );
+
+      config.disable_networking = false;
+      expect(socketRule()).toContain('protocol != NETLINK_AUDIT');
+      expect(seccompPolicy()).toContain('#define NETLINK_AUDIT 9');
+    } finally {
+      config.disable_networking = originalDisableNetworking;
+      config.full_debian_mode = originalFullDebianMode;
     }
   });
 

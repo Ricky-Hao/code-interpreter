@@ -97,9 +97,13 @@ function buildSeccompPolicy(): string {
   const internetSocketFamilies = config.disable_networking
     ? 'domain == AF_INET || domain == AF_INET6 || '
     : '';
-  const netlinkProtocols = config.disable_networking
-    ? 'domain == AF_NETLINK || '
-    : '(domain == AF_NETLINK && protocol != NETLINK_ROUTE && protocol != NETLINK_SOCK_DIAG) || ';
+  const netlinkProtocols = config.full_debian_mode
+    ? config.disable_networking
+      ? '(domain == AF_NETLINK && protocol != NETLINK_AUDIT) || '
+      : '(domain == AF_NETLINK && protocol != NETLINK_ROUTE && protocol != NETLINK_SOCK_DIAG && protocol != NETLINK_AUDIT) || '
+    : config.disable_networking
+      ? 'domain == AF_NETLINK || '
+      : '(domain == AF_NETLINK && protocol != NETLINK_ROUTE && protocol != NETLINK_SOCK_DIAG) || ';
 
   return [
     ...syscallDefines,
@@ -112,6 +116,7 @@ function buildSeccompPolicy(): string {
     '#define AF_VSOCK 40',
     '#define NETLINK_ROUTE 0',
     '#define NETLINK_SOCK_DIAG 4',
+    '#define NETLINK_AUDIT 9',
     '#define CLONE_NAMESPACE_FLAGS 0x7e020000',
     '#define KVM_IOCTL_MAGIC 0xAE00',
     'POLICY sandbox {',
@@ -188,6 +193,19 @@ export { SIGNALS };
 
 export const SANDBOX_DEPENDENCY_MOUNT = '/mnt/deps';
 
+const FULL_DEBIAN_WRITABLE_MOUNTS = [
+  '/usr',
+  '/etc',
+  '/var',
+  '/opt',
+  '/root',
+  '/home',
+  '/srv',
+  '/boot',
+  '/media',
+  '/run',
+];
+
 /* Base sandbox.cfg cached at module load. Per-job runs append a dynamic
  * /mnt/data mount block (see renderJobConfigOverlay) so the bind can carry
  * noexec/nosuid/nodev — flags NsJail's CLI -B form does not accept. */
@@ -220,7 +238,7 @@ export function renderJobConfigOverlay(submissionDir: string, dependencyDir: str
     '    dst: "/mnt/data"',
     '    is_bind: true',
     '    rw: true',
-    '    noexec: true',
+    ...(config.full_debian_mode ? [] : ['    noexec: true']),
     '    nosuid: true',
     '    nodev: true',
     '}',
@@ -683,18 +701,40 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
   } = opts;
 
   const timeoutSecs = Math.max(1, Math.ceil(timeout / 1000));
+  const insideUid = config.full_debian_mode ? 0 : SANDBOX_INSIDE_UID;
+  const insideGid = config.full_debian_mode ? 0 : SANDBOX_INSIDE_GID;
+  const outsideUid = config.full_debian_mode ? 0 : identity.uid;
+  const outsideGid = config.full_debian_mode ? 0 : identity.gid;
+  const identityCount = config.full_debian_mode ? 65536 : 1;
 
   const args: string[] = [
     '--config', cfgPath ?? config.nsjail_config,
     '--log', logPath,
     '--seccomp_string', buildSeccompPolicy(),
-    '--user', `${SANDBOX_INSIDE_UID}:${identity.uid}:1`,
-    '--group', `${SANDBOX_INSIDE_GID}:${identity.gid}:1`,
+    '--user', `${insideUid}:${outsideUid}:${identityCount}`,
+    '--group', `${insideGid}:${outsideGid}:${identityCount}`,
     '-s', '/usr/bin:/bin',
     '-s', '/usr/lib:/lib',
     '-s', '/usr/lib64:/lib64',
     '-R', `${pkgdir}:${pkgdir}`,
   ];
+
+  if (config.full_debian_mode) {
+    args.push('--keep_caps');
+    for (const [source, destination] of [
+      ['/usr/sbin', '/sbin'],
+      ['/dev/pts/ptmx', '/dev/ptmx'],
+      ['/proc/self/fd', '/dev/fd'],
+      ['/proc/self/fd/0', '/dev/stdin'],
+      ['/proc/self/fd/1', '/dev/stdout'],
+      ['/proc/self/fd/2', '/dev/stderr'],
+    ]) {
+      args.push('-s', `${source}:${destination}`);
+    }
+    for (const mount of FULL_DEBIAN_WRITABLE_MOUNTS) {
+      args.push('-B', `${mount}:${mount}`);
+    }
+  }
 
   if (config.use_cgroupv2) {
     args.push('--use_cgroupv2');
@@ -702,7 +742,7 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
 
   if (!config.disable_networking) {
     args.push('--disable_clone_newnet');
-    args.push('-R', '/tmp/codeapi-resolv.conf:/etc/resolv.conf');
+    args.push(config.full_debian_mode ? '-B' : '-R', '/tmp/codeapi-resolv.conf:/etc/resolv.conf');
   }
 
   if (extraPkgdirs) {

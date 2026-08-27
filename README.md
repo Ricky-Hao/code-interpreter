@@ -40,6 +40,56 @@ services, kernel integration, or absolute system paths may not work in this
 relocated form. Remote installs require sandbox networking and run third-party
 package code with the sandbox's network reachability.
 
+### Full Debian MicroVM mode
+
+The `sandbox-runner-full-debian` image target provides a mutable Debian system
+for each execution. The runner keeps one immutable Debian block-root image and,
+for every proxied API request, creates a sparse ext4 scratch disk, starts a new
+libkrun MicroVM on an isolated host port, and mounts the scratch disk as the
+upper layer for `/usr`, `/etc`, `/var`, `/opt`, `/root`, `/home`, and `/srv`.
+The job runs as root inside that guest and can use normal `apt` and `dpkg`.
+When the HTTP response is complete, the runner terminates the MicroVM and
+deletes its scratch disk.
+
+The full-Debian jail also provides private PTYs and POSIX shared memory,
+standard `/dev/fd` and merged-usr links, useful non-sensitive proc statistics,
+an executable `/tmp`, local TCP loopback, Python 3, and a conventional `node`
+command. Each VM receives a fresh machine ID plus neutral hosts and UTC
+timezone files.
+
+Full-Debian VMs use a per-VM passt process and an explicit virtio-net device.
+Do not fall back to libkrun's implicit TSI backend: TSI hijacks guest Internet
+sockets and does not preserve same-guest TCP connections through `127/8`.
+The guest acquires its IPv4 address from passt's DHCP service before starting
+the API. The manager-assigned API port is forwarded by passt and its lifecycle is
+managed through a root-only Unix control socket. A dedicated passt sidecar has
+the narrow `Unconfined` container seccomp and AppArmor exceptions needed to
+create passt's own namespaces; it remains non-privileged with privilege
+escalation disabled, while the manager and VMM remain under `RuntimeDefault`.
+Per-VM passt processes and sockets are removed when their disposable VMs stop.
+
+Input and output files keep the existing API contract. The guest downloads
+file references through the egress gateway into its private `/mnt/data`, scans
+generated files, and uploads them before returning the response. LibreChat and
+the service worker do not need a separate file path for this mode.
+
+One VM handles one request. `SANDBOX_VM_MAX_CONCURRENT` controls how many VMs a
+runner may host, while `LAUNCHER_VCPUS`, `LAUNCHER_RAM_MIB`, and
+`SANDBOX_VM_SCRATCH_SIZE_MIB` size each VM. The full mode intentionally gives
+guest code root and a writable OS, but it still applies the existing NsJail
+PID/mount namespaces, cgroup and rlimit ceilings, seccomp policy, execution
+manifest checks, and MicroVM kernel boundary. It does not provide systemd as
+PID 1, nested containers, kernel module loading, or mounts from user code.
+Loopback does not expose the guest management API to jailed code: the manager
+generates a random token for every VM, overwrites the token header on readiness
+and proxied requests, and the guest rejects every route without it. The
+launcher passes the token only to the guest API; NsJail clears the inherited
+environment and never exports it to the job.
+
+The full-Debian guest provides conventional coding-agent paths and tools:
+`/usr/bin/python3`, `/usr/bin/python`, `/usr/bin/node`, `/usr/bin/nodejs`, `yq`,
+`bat`, `fzf`, `xmllint`, `envsubst`, `inotifywait`, `ctags`, `pnpm`, and `yarn`.
+
 ## Architecture
 
 1. LibreChat sends a code execution request to the **API**
@@ -139,6 +189,12 @@ descriptors in the launcher.
 
 Setting `KVM_ENABLED=false` still selects the directory-root target and the
 host package mount automatically for direct NsJail development.
+
+Run the disposable full Debian mode with the explicit Compose override:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.full-debian.yml up --build
+```
 
 Local Docker Compose files set `CODEAPI_INTERNAL_SERVICE_TOKEN` to a shared
 development value by default. Production deployments must override it with a

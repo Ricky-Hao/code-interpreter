@@ -122,9 +122,9 @@ services:
 
     sandbox-runner:
         build:
-          context: .
-          dockerfile: api/Dockerfile
-          target: sandbox-runner-${KVM_ENABLED:-true}
+                        context: .
+                        dockerfile: api/Dockerfile
+                        target: sandbox-runner-${KVM_ENABLED:-true}
         container_name: sandbox-runner
         restart: always
         privileged: false

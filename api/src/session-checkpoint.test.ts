@@ -28,11 +28,11 @@ afterEach(async () => {
   config.session_workspace_enabled = savedEnabled;
   config.per_job_uids = savedPerJob;
   config.checkpoint_max_bytes = savedCheckpointMaxBytes;
-  await unbindSessionWorkspace().catch(() => {});
+  await unbindSessionWorkspace().catch(() => { });
   resetSessionWorkspaceStateForTests();
   await fsp
     .rm(path.join(SANDBOX_WORKSPACE_ROOT, SESSION_WORKSPACE_ID), { recursive: true, force: true })
-    .catch(() => {});
+    .catch(() => { });
 });
 
 /** CI and local dev run bun as a non-root user, where the default per-job-UID
@@ -53,8 +53,8 @@ function fakeRes(): { status: number; body: unknown; setHeader: () => void; dest
   const res = {
     statusCode: 0,
     body: undefined as unknown,
-    setHeader: () => {},
-    destroy: () => {},
+    setHeader: () => { },
+    destroy: () => { },
     status(code: number) {
       res.statusCode = code;
       return {

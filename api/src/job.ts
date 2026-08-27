@@ -762,7 +762,7 @@ interface ExecuteResult {
 const jobQueue: Array<() => void> = [];
 
 async function acquireJobIdentity(log: Logger): Promise<SandboxJobIdentity> {
-  for (;;) {
+  for (; ;) {
     const identity = sandboxJobUidPool.acquire();
     if (identity) return identity;
     log.info('Awaiting job slot');
@@ -890,7 +890,7 @@ export class Job {
       for await (const chunk of stream) hash.update(chunk as Buffer);
       return hash.digest('hex');
     } finally {
-      await handle?.close().catch(() => {});
+      await handle?.close().catch(() => { });
     }
   }
 
@@ -1356,12 +1356,12 @@ export class Job {
         throwIfAborted(operation.signal);
         response = await this.fetchInputObject(file, operation.signal);
         if (operation.signal?.aborted) {
-          await response.body?.cancel().catch(() => {});
+          await response.body?.cancel().catch(() => { });
           throw abortReason(operation.signal);
         }
 
         if (response.status === 404 && attempt < maxRetries) {
-          await response.body?.cancel().catch(() => {});
+          await response.body?.cancel().catch(() => { });
           const delay = retryDelay * Math.pow(2, attempt - 1);
           this.log.info({ fileId: file.id, attempt, maxRetries, delay }, 'File not found, retrying');
           await sleep(delay, operation.signal);
@@ -1369,7 +1369,7 @@ export class Job {
         }
 
         if (!response.ok) {
-          await response.body?.cancel().catch(() => {});
+          await response.body?.cancel().catch(() => { });
           throw new Error(`HTTP error: ${response.status}`);
         }
 
@@ -1428,7 +1428,7 @@ export class Job {
         return originalName;
       } catch (error: unknown) {
         if (response?.body && !response.bodyUsed) {
-          await response.body.cancel().catch(() => {});
+          await response.body.cancel().catch(() => { });
         }
         if (operation.signal?.aborted) {
           try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
@@ -1472,7 +1472,7 @@ export class Job {
       file.input_cache_key,
     );
     if (signal?.aborted) {
-      await cached?.handle.close().catch(() => {});
+      await cached?.handle.close().catch(() => { });
       throwIfAborted(signal);
     }
     if (cached) {
@@ -2390,7 +2390,7 @@ export class Job {
     } finally {
       if (timeout) clearTimeout(timeout);
       stream?.destroy();
-      await uploadHandle?.close().catch(() => {});
+      await uploadHandle?.close().catch(() => { });
       /* Drain or cancel the response body. Undici keeps the socket
        * reserved until the body is consumed; under concurrent uploads,
        * leaving bodies unread exhausts the connection pool and stalls

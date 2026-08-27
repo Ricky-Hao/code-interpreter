@@ -62,6 +62,7 @@ export function legacyPackagesDirectory(raw: string | undefined): string | undef
 
 export const config = {
   hardened_sandbox_mode: process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
+  full_debian_mode: process.env.SANDBOX_FULL_DEBIAN_MODE === 'true',
   log_level: process.env.SANDBOX_LOG_LEVEL ?? 'DEBUG',
   bind_address: `0.0.0.0:${process.env.PORT ?? 2000}`,
   packages_directory: cleanDirectory(process.env.SANDBOX_PACKAGES_DIRECTORY)

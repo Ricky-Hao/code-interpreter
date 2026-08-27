@@ -92,7 +92,7 @@ describe('Job cleanup', () => {
     const session = {
       runtimeSessionId: 'rt_prime_dependencies',
       acquire: async () => lease,
-      markDirty: () => {},
+      markDirty: () => { },
     } as unknown as SessionWorkspace;
     const job = new Job({
       session_id: 'prime-dependencies',
@@ -236,7 +236,7 @@ describe('Job cleanup', () => {
     const session = {
       runtimeSessionId: 'rt_prime_concurrency',
       acquire: async () => lease,
-      markDirty: () => {},
+      markDirty: () => { },
     } as unknown as SessionWorkspace;
     const files: TFile[] = Array.from(
       { length: config.prime_concurrency + 4 },

@@ -86,7 +86,7 @@ describe('tool-call socket proxy', () => {
       socketPath,
       rawTarget: upstream.url,
       idleSocketTimeoutMs: 100,
-      log: { log() {}, warn() {}, error() {} },
+      log: { log() { }, warn() { }, error() { } },
     });
     handles.push(proxy);
 
@@ -126,7 +126,7 @@ describe('tool-call socket proxy', () => {
       socketPath,
       rawTarget: upstream.url,
       idleSocketTimeoutMs: 50,
-      log: { log() {}, warn() {}, error() {} },
+      log: { log() { }, warn() { }, error() { } },
     });
     handles.push(proxy);
 
@@ -149,7 +149,7 @@ describe('tool-call socket proxy', () => {
     const proxy = await startToolCallSocketProxy({
       socketPath,
       rawTarget: upstream.url,
-      log: { log() {}, warn() {}, error() {} },
+      log: { log() { }, warn() { }, error() { } },
     });
     handles.push(proxy);
 
@@ -165,7 +165,7 @@ describe('tool-call socket proxy', () => {
       rawTarget: upstream.url,
       maxConnections: 2,
       idleSocketTimeoutMs: 500,
-      log: { log() {}, warn() {}, error() {} },
+      log: { log() { }, warn() { }, error() { } },
     });
     handles.push(proxy);
 
@@ -207,7 +207,7 @@ describe('tool-call socket proxy', () => {
       rawTarget: `http://127.0.0.1:${address.port}`,
       maxConnections: 8,
       maxActiveRequests: 1,
-      log: { log() {}, warn() {}, error() {} },
+      log: { log() { }, warn() { }, error() { } },
     });
     handles.push(proxy);
 
@@ -275,13 +275,13 @@ describe('tool-call socket proxy', () => {
       rawTarget: `http://127.0.0.1:${address.port}`,
       maxActiveRequests: 1,
       activeRequestTimeoutMs: 50,
-      log: { log() {}, warn() {}, error() {} },
+      log: { log() { }, warn() { }, error() { } },
     });
     handles.push(proxy);
 
     const client = await createRawSocket(socketPath);
     const body = '{"tool_name":"slow","input":{}}';
-    client.end([
+    client.write([
       'POST /tool-call HTTP/1.1',
       'Host: localhost',
       'Content-Type: application/json',
@@ -325,7 +325,7 @@ describe('tool-call socket proxy', () => {
       socketPath,
       rawTarget: `http://127.0.0.1:${address.port}`,
       maxBodyBytes: 4,
-      log: { log() {}, warn() {}, error() {} },
+      log: { log() { }, warn() { }, error() { } },
     });
     handles.push(proxy);
 

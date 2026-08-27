@@ -24,6 +24,13 @@ Each code execution runs in a fresh NsJail sandbox with the following isolation:
 | **Filesystem** | Read-only `/usr` and `/pkgs`; writable `/mnt/data` plus isolated `/mnt/deps` | User files stay noexec while temporary dependencies can execute without suid or devices |
 | **Network** | `clone_newnet` (empty network namespace) | No outbound connectivity by default |
 
+`SANDBOX_FULL_DEBIAN_MODE=true` changes the identity and filesystem rows for
+the disposable full-Debian image only: the job runs as guest root, `/mnt/data`
+and `/tmp` are executable, and the system directories are writable overlay
+mounts backed by that VM's scratch disk. It also enables local loopback,
+private PTYs, and POSIX shared memory. A fresh MicroVM is mandatory for every
+request, so these changes never share a writable root with another job.
+
 ## Configuration
 
 ### NsJail Config
@@ -51,6 +58,8 @@ All prefixed with `SANDBOX_` unless noted:
 | `SANDBOX_COMPILE_MEMORY_LIMIT` | `-1` | Compile memory cgroup limit (bytes, -1 = no limit) |
 | `SANDBOX_RUN_MEMORY_LIMIT` | `-1` | Run memory cgroup limit (bytes, -1 = no limit) |
 | `SANDBOX_MAX_CONCURRENT_JOBS` | `8` | Max parallel executions per sandbox runner |
+| `SANDBOX_FULL_DEBIAN_MODE` | `false` | Run one root job against writable guest overlay mounts; set by the full-Debian VM manager |
+| `SANDBOX_VM_CONTROL_TOKEN` | _(empty)_ | Per-VM manager token required in full-Debian mode; passed to the guest API but never exported into NsJail |
 | `SANDBOX_RLIMIT_AS` | `4096` | Address space rlimit (MB) |
 | `SANDBOX_RLIMIT_FSIZE` | `100` | File size rlimit (MB) |
 | `SANDBOX_LIMIT_OVERRIDES` | `{}` | JSON object for per-runtime limit overrides |
@@ -105,6 +114,21 @@ require `SANDBOX_DISABLE_NETWORKING=false`. Enabling them also lets untrusted
 package install scripts access every network address the sandbox can reach, so
 use only package sources appropriate for that trust boundary.
 
+In the `sandbox-runner-full-debian` target, use Debian's normal package tools
+instead:
+
+```bash
+apt-get update
+apt-get install -y libreoffice
+```
+
+These operations modify only the current MicroVM's scratch overlay. Full mode
+also exposes `/dev/ptmx`, `/dev/tty`, `/dev/shm`, standard file-descriptor
+links, selected proc statistics, local TCP loopback, and executable temporary
+files for compiler and coding-agent workflows. Package
+services cannot become host services, systemd is not PID 1, and the VM is
+destroyed after the API response.
+
 ## Filesystem Layout Inside the Sandbox
 
 ```
@@ -124,6 +148,13 @@ use only package sources appropriate for that trust boundary.
 /dev/zero           Device node (read-only)
 /pkgs/   Language runtime packages (read-only bind mount)
 ```
+
+Full Debian mode changes `/usr`, `/etc`, `/var`, `/opt`, `/root`, `/home`, and
+`/srv` to writable overlay mounts and permits execution from `/mnt/data` and
+`/tmp`. Its passt-backed virtio-net interface obtains an IPv4 lease before API
+startup and preserves normal guest-local TCP loopback semantics; libkrun's
+implicit TSI backend is intentionally disabled. A random manager-owned token
+protects every guest API route and is absent from the jailed environment.
 
 ## API Endpoints
 

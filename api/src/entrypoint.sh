@@ -1,6 +1,28 @@
 #!/bin/bash
 set -e
 
+if [ "${SANDBOX_FULL_DEBIAN_MODE:-false}" = "true" ]; then
+    /usr/local/libexec/codeapi-full-debian-overlay.sh
+    if ! ip link set lo up; then
+        echo "FATAL: unable to enable full Debian loopback" >&2
+        exit 1
+    fi
+    if [ -d /sys/class/net/eth0 ]; then
+        ip link set eth0 up
+        if ! dhclient -4 -v -1 eth0; then
+            echo "FATAL: unable to configure the full Debian virtio-net interface" >&2
+            exit 1
+        fi
+        ip -4 address show dev eth0
+        ip -4 route show
+    fi
+    FULL_DEBIAN_NSJAIL_CONFIG=/run/codeapi-full-debian-sandbox.cfg
+    bun run /sandbox_api/src/full-debian-nsjail-config.ts \
+        "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
+        "$FULL_DEBIAN_NSJAIL_CONFIG"
+    export NSJAIL_CONFIG="$FULL_DEBIAN_NSJAIL_CONFIG"
+fi
+
 # shellcheck source=../../docker/runtime-resolver.sh
 . /usr/local/libexec/codeapi-runtime-resolver.sh
 
@@ -171,7 +193,21 @@ SMOKE_DIR=$(mktemp -d)
 SMOKE_PER_JOB_UIDS="${SANDBOX_PER_JOB_UIDS:-true}"
 SMOKE_UID_BASE="${SANDBOX_JOB_UID_BASE:-200000}"
 SMOKE_GID_BASE="${SANDBOX_JOB_GID_BASE:-200000}"
-if [ "$SMOKE_PER_JOB_UIDS" = "true" ]; then
+SMOKE_INSIDE_UID=65534
+SMOKE_INSIDE_GID=65534
+SMOKE_IDENTITY_COUNT=1
+SMOKE_EXTRA_ARGS=()
+if [ "${SANDBOX_FULL_DEBIAN_MODE:-false}" = "true" ]; then
+    SMOKE_INSIDE_UID=0
+    SMOKE_INSIDE_GID=0
+    SMOKE_OUTSIDE_UID=0
+    SMOKE_OUTSIDE_GID=0
+    SMOKE_IDENTITY_COUNT=65536
+    SMOKE_EXTRA_ARGS=(--keep_caps)
+    for mount_path in /usr /etc /var /opt /root /home /srv /boot /media /run; do
+        SMOKE_EXTRA_ARGS+=(-B "$mount_path:$mount_path")
+    done
+elif [ "$SMOKE_PER_JOB_UIDS" = "true" ]; then
     SMOKE_OUTSIDE_UID="$SMOKE_UID_BASE"
     SMOKE_OUTSIDE_GID="$SMOKE_GID_BASE"
 else
@@ -197,7 +233,9 @@ fi
 # shellcheck disable=SC2016
 if timeout 10 /usr/sbin/nsjail --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
     "${NSJAIL_CGROUP_ARGS[@]}" --log "$SMOKE_LOG" \
-    --user "65534:${SMOKE_OUTSIDE_UID}:1" --group "65534:${SMOKE_OUTSIDE_GID}:1" \
+    --user "${SMOKE_INSIDE_UID}:${SMOKE_OUTSIDE_UID}:${SMOKE_IDENTITY_COUNT}" \
+    --group "${SMOKE_INSIDE_GID}:${SMOKE_OUTSIDE_GID}:${SMOKE_IDENTITY_COUNT}" \
+    "${SMOKE_EXTRA_ARGS[@]}" \
     -s /usr/bin:/bin -s /usr/lib:/lib -s /usr/lib64:/lib64 \
     -B "$SMOKE_DIR:/mnt/data" \
     -- /bin/sh -c 'getent passwd 65534 >/dev/null && getent group 65534 >/dev/null && test -d /etc/apt/sources.list.d && test -d /etc/apt/trusted.gpg.d && test -r /var/lib/dpkg/status && printf "%s\n" sandbox_ok > /mnt/data/smoke.txt && test "$(cat /mnt/data/smoke.txt)" = sandbox_ok' > /dev/null 2>&1; then
