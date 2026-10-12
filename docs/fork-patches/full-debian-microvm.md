@@ -1,6 +1,6 @@
 # FP-004 — 一次性可写 Debian MicroVM
 
-**状态：必须保留。** 原始 11 提交的 rebase 终点为 `4529d241b1b7e2db0cd431be9f465d7421b57042`，后续本地集成另含已审阅的 devpts 等修复；该终点不是永久当前 HEAD。manager 16 项及 passt 3 项 mock/假进程测试通过，真实 VM 启动、apt/dpkg 和端到端交付未验收。
+**状态：必须保留。** 原始 11 提交的 rebase 终点为 `4529d241b1b7e2db0cd431be9f465d7421b57042`，后续本地集成另含已审阅的 devpts 等修复；该终点不是永久当前 HEAD。原 manager 16 项及 passt 3 项 mock/假进程测试通过；发布修复后增至 23 项及 4 项，真实 VM 启动、apt/dpkg 和端到端交付未验收。
 
 ## 目标与历史证据
 
@@ -40,13 +40,24 @@
 1. 保留当前管道执行、setup gate、supervised API 和 smoke stderr；未恢复已删除的 `tool-call-socket-proxy.test.ts`。
 2. 保留 Bun 1.4.2、guest-dns/hosted-app assets、package runtime pipe patches；额外 distro Python 也执行 patch installer，未知 stdlib 布局 fail-fast。
 3. `/run` 使用 remount，避免旧脚本再次挂载 tmpfs 遮蔽 resolver。rootfs 预建 DNS target，guest entrypoint 验证 virtio-net/DHCP 后才启动 API。
-4. 原 manager 未启动 passt supervisor；现由 `running_passt_supervisor` 启停并验证 socket readiness，launcher passt 路径不竞争共享 DNS relay 端口。
+4. `running_passt_supervisor` 显式区分 `managed`/`external` 所有权：前者启停自有 supervisor，后者仅有界等待外部 sidecar。不得以启动/退出清理为由删除外部 control socket 或接管共享进程。launcher passt 路径不竞争共享 DNS relay 端口。
 5. 不恢复旧 netlink/audit 例外或 descriptor passing。AF_INET/AF_INET6 支持 loopback；禁网时保留 net namespace，启网才共享 VM 接口。
 6. manager 强制 manifest 和一次性模式开关，控制 token 只通过 launcher allowlist 进入受信 API；现有 auth/manifest middleware 保留。
 7. 跟踪 active launcher、shutdown 拒绝新任务、终止私有进程组（即使 leader 已退出）、限制 HTTP body 等待，保留 scratch/passt/slot 的 finally cleanup。
 8. manager 的公开端点仍限 health 与 execute；当前默认 HTTP 执行路径不需要持久 session/discovery。manager 没有实现独立 metrics 聚合，不能宣称支持全部上游长会话功能。
 9. 独立审阅确认旧基础 devpts 的 `gid=5` 在受限模式仅映射 GID 65534 时会导致 mount EINVAL。后续本地修复将基础配置改为 `gid=65534`，仅 Full Debian renderer 将 devpts 转为 `gid=5`，对应完整 `0:0:65536` GID 映射；保留 PTY options 与安全 mount flags。回归同时检查两种配置与实际 `buildArgs` 范围，不能只断言字符串存在。
 10. 新增 renderer/测试的 CommonJS/import.meta 类型冲突已修复；使用 `require.main === module` 与 `__dirname`。测试实际运行 guest entrypoint 所用的 Bun CLI，验证输出等于 renderer 并具有 0600 权限。
+
+## Supervisor 所有权与部署要求
+
+在 **host manager** 设置 `SANDBOX_VM_PASST_SUPERVISOR_MODE`，仅接受大小写精确的两个值；空值、未知值均 fail closed：
+
+- `managed`（默认）：保留自包含 runner 的 supervisor 启动、readiness 和回收；可用 `SANDBOX_VM_PASST_SUPERVISOR` 指定可执行文件，默认 `/usr/local/bin/passt-supervisor.py`。
+- `external`：独立 sidecar 已拥有 supervisor/control socket。manager 仅连接并等待现有协议可用，不 spawn/stop/reap supervisor、不 unlink 共享 socket、不杀无关进程；仍为自身 VM 发送 `start`/`stop`，保留 VM/session 清理。
+
+`SANDBOX_VM_PASST_CONTROL_SOCKET` 默认 `/run/codeapi-passt/control.sock`。external 使用无 VM ID 的 `{}\n` 探测，严格匹配现有协议的 `{"ok":false,"error":"vm_id is required"}` 验证响应，不新增协议或修改 session。有界等待复用 `SANDBOX_VM_BOOT_TIMEOUT_SECONDS`（默认 45，正整数秒）；缺失/拒绝连接可重试至期限，权限、非法响应、超时均有明确启动错误。external 不使用 supervisor executable 配置。
+
+**部署前必须核对实际配置：** 使用独立 passt sidecar 时，manager 必须显式设置 `SANDBOX_VM_PASST_SUPERVISOR_MODE=external`；sidecar 独占创建/删除 control socket，共享 socket 目录且 manager 可连接。此仓库未检查或修改生产 manifest，不能据此推定生产已有该配置。`managed` 默认只适合拥有该 socket 的自包含拓扑。
 
 ## 正反向验收
 
@@ -63,7 +74,11 @@ bash -n docker/full-debian-overlay.sh api/src/entrypoint.sh
 
 **反向 mock：** 无效 ID/port/framing、重复/负 Content-Length、unsupported endpoint、错误 guest token、launcher 失败、supervisor 启动失败、closed manager、leader 退出后的进程组清理。
 
+**发布修复回归：** 已存活 fake supervisor 的 external readiness、manager 正常/异常退出后 socket inode 与服务仍存活；禁止 spawn/unlink/kill 的断言、自有 VM 的 start/stop；迟到 sidecar、缺失/残留 socket、静默连接、超长/无效响应、权限错误和非法模式。managed 原有启动/回收测试保留；真实 supervisor handler 验证 readiness probe 不改变 session。证据位于 `/workspaces/codeapi-release-fix-20261012/report.md`，属于本地 Unix socket/假进程测试，不是 KVM E2E。
+
 **审阅后配置回归：** 默认 devpts 不要求未映射 GID，Full Debian 仍使用已映射 tty GID 5；CLI 与函数渲染一致。相关七文件 139 pass，API 全量 510 pass / 2 skip / 0 fail；这是配置/进程 fixture 证据，未实际 mount devpts 或在 guest 打开 PTY。
+
+**本轮发布修复验证：** input-manifest fixture 自有依赖 lease 并恢复测试配置，四项 CI 失败在实际 UID/GID 65534 复现后修复；增加两项有界等待/早期错误传播回归。非 root 三文件 39 pass，root 相关五文件 68 pass，API 全量 512 pass / 2 skip / 0 fail；service 保留此前 1214 pass / 17 skip 证据，本轮未重跑。API typecheck 仍有与上次固定上游基线完全等价的 7 项诊断，不宣称全局类型检查通过。
 
 **必须补做的真实验收：** 在隔离 KVM fixture 构建 `sandbox-runner-full-debian`，通过当前签名执行接口检查 guest UID 0、安装并运行 Debian 包、在 `/tmp` 编译执行、PTY/shm/FD、常规 Python/Node、同 guest nonce loopback；下载 `/mnt/data` 产物后确认 VM 消失。下次执行不得看到旧 OS/包/进程。启网/禁网、错误 token/manifest、timeout/overflow/cancellation/readiness failure 均须验证资源清空。
 

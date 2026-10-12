@@ -14,6 +14,7 @@ import {
   SANDBOX_READONLY_FILE_MODE,
   compatibilityModeForSkippedChown,
   fallbackSandboxIdentity,
+  type SandboxWorkspaceLease,
 } from './workspace-isolation';
 
 /**
@@ -50,8 +51,10 @@ function makeRuntime(): Runtime {
   };
 }
 
+const dependencyDirs: string[] = [];
+
 function makeJob(files: TFile[] = [], session?: SessionWorkspace): Job {
-  return new Job({
+  const job = new Job({
     session_id: 'test-session',
     egress_grant: 'test-grant',
     runtime: makeRuntime(),
@@ -63,6 +66,13 @@ function makeJob(files: TFile[] = [], session?: SessionWorkspace): Job {
     memory_limits: { compile: 100_000_000, run: 100_000_000 },
     session,
   });
+  (job as unknown as { createDependencyWorkspace(): Promise<SandboxWorkspaceLease> })
+    .createDependencyWorkspace = async () => {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'download-dependencies-'));
+      dependencyDirs.push(dir);
+      return { dir, workspaceId: path.basename(dir), identity: fallbackSandboxIdentity() };
+    };
+  return job;
 }
 
 function sessionWorkspaceAt(
@@ -89,7 +99,11 @@ function currentUid(): number | undefined {
 }
 
 function expectedWritableMode(mode: number): number {
-  return currentUid() === 0 ? mode : compatibilityModeForSkippedChown(mode);
+  const identity = fallbackSandboxIdentity();
+  // An unprivileged runner already using the sandbox UID/GID can chown to
+  // itself; compatibility permissions apply only when ownership is skipped.
+  const ownsSandboxIdentity = currentUid() === identity.uid && process.getgid?.() === identity.gid;
+  return currentUid() === 0 || ownsSandboxIdentity ? mode : compatibilityModeForSkippedChown(mode);
 }
 
 /* Minimal stand-in for the file-server's `GET /sessions/:sid/objects/:id`.
@@ -170,6 +184,7 @@ afterEach(async () => {
   (config as { file_server_url: string }).file_server_url = `http://127.0.0.1:${serverPort}`;
   (config as { per_job_uids: boolean }).per_job_uids = false;
   await fsp.rm(tmpDir, { recursive: true, force: true });
+  await Promise.all(dependencyDirs.splice(0).map(dir => fsp.rm(dir, { recursive: true, force: true })));
 });
 
 describe('downloadAndWriteFile destinations', () => {

@@ -78,6 +78,22 @@ create passt's own namespaces; it remains non-privileged with privilege
 escalation disabled, while the manager and VMM remain under `RuntimeDefault`.
 Per-VM passt processes and sockets are removed when their disposable VMs stop.
 
+Supervisor ownership must match the deployment topology:
+`SANDBOX_VM_PASST_SUPERVISOR_MODE=managed` (default) starts and reaps the
+manager-owned supervisor for self-contained runners. With a separate passt
+sidecar, set **`SANDBOX_VM_PASST_SUPERVISOR_MODE=external` on the manager** before
+rollout. In external mode the manager waits for the existing protocol on
+`SANDBOX_VM_PASST_CONTROL_SOCKET` (default `/run/codeapi-passt/control.sock`),
+bounded by `SANDBOX_VM_BOOT_TIMEOUT_SECONDS` (default `45`, positive integer).
+It never starts/stops the shared supervisor or unlinks its control socket;
+it still sends start/stop requests for its own per-VM passt sessions.
+Unknown modes, protocol errors, and readiness timeouts fail startup.
+The sidecar must own that socket, share its socket directory with the manager,
+and permit the manager to connect. Verify the actual deployment configuration;
+this repository does not establish that a production manifest sets these values.
+See [FP-004](docs/fork-patches/full-debian-microvm.md) for ownership regressions
+and remaining real-KVM acceptance requirements.
+
 Input and output files keep the existing API contract. The guest downloads
 file references through the egress gateway into its private `/mnt/data`, scans
 generated files, and uploads them before returning the response. LibreChat and
@@ -171,6 +187,7 @@ model details. The worker protocol and CLI live in the provider-neutral
 [`@librechat/code`](packages/code/README.md) package.
 
 ## Optional sandbox networking
+
 `SANDBOX_DISABLE_NETWORKING=false` deliberately gives executed code unrestricted
 network access. NsJail shares the runner network namespace, receives the runner's
 runtime resolver configuration through the microVM and mounts it read-only, and

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,17 @@ SPEC.loader.exec_module(passt_supervisor)
 
 
 class PasstSupervisorTest(unittest.TestCase):
+    def test_readiness_probe_uses_existing_validation_without_mutating_sessions(self):
+        handler = object.__new__(passt_supervisor.ControlHandler)
+        handler.rfile = io.BytesIO(b'{}\n')
+        handler.wfile = io.BytesIO()
+        with mock.patch.object(passt_supervisor, "SUPERVISOR") as supervisor:
+            handler.handle()
+            self.assertEqual(handler.wfile.getvalue(), b'{"ok":false,"error":"vm_id is required"}\n')
+            supervisor.start.assert_not_called()
+            supervisor.stop.assert_not_called()
+            supervisor.close.assert_not_called()
+
     def test_rejects_invalid_vm_ids_and_ports(self):
         for vm_id in ["vm-123", "../vm-12345678", "vm-1234567_", "vm-123456789"]:
             with self.assertRaisesRegex(ValueError, "invalid VM ID"):

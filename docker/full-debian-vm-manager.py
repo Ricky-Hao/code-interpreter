@@ -60,6 +60,11 @@ class ManagerConfig:
     launcher_path: str = "/usr/local/bin/launcher-entrypoint.sh"
     passt_control_socket: str = "/run/codeapi-passt/control.sock"
     passt_supervisor_path: str = "/usr/local/bin/passt-supervisor.py"
+    passt_supervisor_mode: str = "managed"
+
+    def __post_init__(self) -> None:
+        if self.passt_supervisor_mode not in {"managed", "external"}:
+            raise ValueError("SANDBOX_VM_PASST_SUPERVISOR_MODE must be managed or external")
 
     @classmethod
     def from_env(cls) -> "ManagerConfig":
@@ -83,6 +88,7 @@ class ManagerConfig:
             passt_supervisor_path=os.environ.get(
                 "SANDBOX_VM_PASST_SUPERVISOR", "/usr/local/bin/passt-supervisor.py"
             ),
+            passt_supervisor_mode=os.environ.get("SANDBOX_VM_PASST_SUPERVISOR_MODE", "managed"),
         )
 
 
@@ -359,8 +365,52 @@ class VmManager:
             self._stop_vm(process)
 
 
+def wait_for_external_passt_supervisor(config: ManagerConfig) -> None:
+    deadline = time.monotonic() + config.boot_timeout_seconds
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(min(1.0, max(0.001, deadline - time.monotonic())))
+                connection.connect(config.passt_control_socket)
+                # Existing protocol's validation-only request: no VM ID/action,
+                # so neither new nor already-deployed sidecars can mutate sessions.
+                connection.sendall(b"{}\n")
+                response = b""
+                while not response.endswith(b"\n"):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("external passt readiness response deadline exceeded")
+                    connection.settimeout(min(1.0, remaining))
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        raise RuntimeError("external passt supervisor closed the readiness connection")
+                    response += chunk
+                    if len(response) > 4096:
+                        raise RuntimeError("external passt supervisor readiness response is too large")
+                try:
+                    result = json.loads(response)
+                except (ValueError, UnicodeError) as error:
+                    raise RuntimeError("invalid external passt supervisor readiness response") from error
+                if result != {"ok": False, "error": "vm_id is required"}:
+                    raise RuntimeError("unexpected external passt supervisor readiness response")
+                return
+        except (FileNotFoundError, ConnectionRefusedError, TimeoutError) as error:
+            last_error = error
+        except OSError as error:
+            raise RuntimeError(f"cannot connect to external passt supervisor at {config.passt_control_socket}: {error}") from error
+        time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+    raise TimeoutError(f"external passt supervisor did not become ready at {config.passt_control_socket}: {last_error}")
+
+
 @contextlib.contextmanager
 def running_passt_supervisor(config: ManagerConfig):
+    if config.passt_supervisor_mode == "external":
+        wait_for_external_passt_supervisor(config)
+        # The socket and supervisor belong to a sidecar. Never take ownership,
+        # including when manager startup or the context body raises.
+        yield None
+        return
     environment = os.environ.copy()
     environment["PASST_SOCKET_ROOT"] = str(Path(config.passt_control_socket).parent)
     if Path(config.passt_control_socket).name != "control.sock":

@@ -131,7 +131,7 @@ destroyed after the API response.
 
 ## Filesystem Layout Inside the Sandbox
 
-```
+```text
 /mnt/data/          Working directory (bind mount, writable)
   ├── *.py          User code files
   ├── *.js / *.ts   User code files
@@ -155,6 +155,32 @@ Full Debian mode changes `/usr`, `/etc`, `/var`, `/opt`, `/root`, `/home`, and
 startup and preserves normal guest-local TCP loopback semantics; libkrun's
 implicit TSI backend is intentionally disabled. A random manager-owned token
 protects every guest API route and is absent from the jailed environment.
+
+### Full Debian passt supervisor ownership
+
+Set `SANDBOX_VM_PASST_SUPERVISOR_MODE` on the host manager:
+
+- `managed` (default): start and reap its own supervisor, for self-contained runners.
+  `SANDBOX_VM_PASST_SUPERVISOR` selects the executable (default
+  `/usr/local/bin/passt-supervisor.py`).
+- `external`: connect to a separately managed sidecar; never spawn, stop, or
+  reap that supervisor, unlink its control socket, or kill unrelated processes.
+  The executable setting is unused. The manager still starts/stops its own
+  per-VM passt sessions over the existing protocol.
+
+`SANDBOX_VM_PASST_CONTROL_SOCKET` defaults to `/run/codeapi-passt/control.sock`.
+External readiness sends `{}` followed by a newline and requires the existing
+validation response `{"ok":false,"error":"vm_id is required"}`; this probe cannot
+change sessions. Waiting is bounded by `SANDBOX_VM_BOOT_TIMEOUT_SECONDS`
+(default `45`, positive integer). Invalid modes fail closed; socket permission,
+protocol, and timeout failures are explicit startup errors.
+
+**Deployment requirement:** with a separate sidecar, configure `external` on
+the manager before rollout, share the sidecar-owned socket directory, and
+verify connection permissions and readiness. Production manifests have not
+been inspected or modified here. Local Unix-socket/fake-process tests do not
+prove real passt, virtio-net, or KVM execution; see
+[FP-004](../docs/fork-patches/full-debian-microvm.md).
 
 ## API Endpoints
 

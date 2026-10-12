@@ -6,10 +6,14 @@ import * as path from 'node:path';
 import { config } from './config';
 import { Job } from './job';
 import { SESSION_INPUT_CACHE_DIR } from './session-inputs';
-import { fallbackSandboxIdentity } from './workspace-isolation';
+import type { SandboxWorkspaceLease } from './workspace-isolation';
 
 const originalFetch = globalThis.fetch;
-const originalConfig = { http_input_cache_enabled: config.http_input_cache_enabled, egress_gateway_url: config.egress_gateway_url };
+const originalConfig = {
+  http_input_cache_enabled: config.http_input_cache_enabled,
+  egress_gateway_url: config.egress_gateway_url,
+  hardened_sandbox_mode: config.hardened_sandbox_mode,
+};
 const dirs: string[] = [];
 const keys: string[] = [];
 afterEach(async () => {
@@ -22,6 +26,7 @@ afterEach(async () => {
 async function fixture(count: number, mode: 'batch' | 'legacy' | 'race' = 'batch') {
   config.http_input_cache_enabled = true;
   config.egress_gateway_url = 'http://manifest.test';
+  config.hardened_sandbox_mode = false;
   let manifests = 0, singlePreflights = 0, downloads = 0;
   const version = randomUUID();
   const freshVersion = randomUUID();
@@ -53,8 +58,11 @@ async function fixture(count: number, mode: 'batch' | 'legacy' | 'race' = 'batch
   async function prime(egressGrant = 'test-grant') {
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'manifest-prime-'));
     dirs.push(dir);
+    const identity = { slot: -1, uid: process.getuid!(), gid: process.getgid!(), perJobUid: false };
+    const dependencyDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'manifest-dependencies-'));
+    dirs.push(dependencyDir);
     const session = {
-      runtimeSessionId: 'test', acquire: async () => ({ dir, workspaceId: 'test', identity: fallbackSandboxIdentity() }),
+      runtimeSessionId: 'test', acquire: async () => ({ dir, workspaceId: 'test', identity }),
       primedInputId: () => undefined, markPrimed: () => {}, markDirty: () => {},
     };
     const job = new Job({
@@ -64,11 +72,47 @@ async function fixture(count: number, mode: 'batch' | 'legacy' | 'race' = 'batch
       memory_limits: { run: 128e6, compile: 128e6 }, session,
     } as never);
     (job as unknown as { log: { level: string } }).log.level = 'silent';
-    await job.prime();
-    expect(await fsp.readFile(path.join(dir, 'file0.txt'), 'utf8')).toBe('bytes');
+    // Own both leases, as in job-cleanup fixtures. Do not allocate/chown the
+    // production workspace root just to test manifest authorization on CI.
+    (job as unknown as { createDependencyWorkspace(): Promise<SandboxWorkspaceLease> })
+      .createDependencyWorkspace = async () => ({ dir: dependencyDir, workspaceId: path.basename(dependencyDir), identity });
+    try {
+      await job.prime();
+      expect(await fsp.readFile(path.join(dir, 'file0.txt'), 'utf8')).toBe('bytes');
+    } finally {
+      await job.cleanup();
+    }
   }
   return { prime, counts: () => ({ manifests, singlePreflights, downloads }) };
 }
+
+async function waitForFixturePhase(ready: () => boolean, execution: Promise<unknown>, phase: string, timeoutMs = 1000): Promise<void> {
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        if (ready()) { resolve(); return; }
+        poll = setInterval(() => { if (ready()) resolve(); }, 1);
+        timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${phase}`)), timeoutMs);
+      }),
+      execution.then(() => { throw new Error(`Execution completed before ${phase}`); }),
+    ]);
+  } finally {
+    clearInterval(poll);
+    clearTimeout(timeout);
+  }
+}
+
+test('fixture phase wait preserves an early prime rejection', async () => {
+  const failure = new Error('original prime setup failure');
+  await expect(waitForFixturePhase(() => false, Promise.reject(failure), 'creator download')).rejects.toBe(failure);
+});
+
+test('fixture phase wait is bounded when execution never reaches the phase', async () => {
+  await expect(waitForFixturePhase(() => false, new Promise(() => {}), 'creator download', 20))
+    .rejects.toThrow('Timed out waiting for creator download');
+});
 
 test('240 inputs use one authorized manifest per fresh workspace and reuse only content', async () => {
   const f = await fixture(240);
@@ -94,15 +138,13 @@ test('one execution grant denial cannot fail a coalesced execution with its own 
   const f = await fixture(1);
   const underlying = globalThis.fetch;
   let release!: () => void;
-  let started!: () => void;
   const blocked = new Promise<void>(resolve => { release = resolve; });
-  const creatorStarted = new Promise<void>(resolve => { started = resolve; });
   let deniedDownloads = 0, validDownloads = 0;
   globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
     if (String(url).endsWith('/objects/f0')) {
       if (new Headers(init?.headers).get('X-CodeAPI-Egress-Grant') === 'denied') {
         deniedDownloads++;
-        started(); await blocked;
+        await blocked;
         return new Response(null, { status: 403, headers: { 'X-CodeAPI-Error-Code': 'scope_mismatch' } });
       }
       validDownloads++;
@@ -110,14 +152,17 @@ test('one execution grant denial cannot fail a coalesced execution with its own 
     return underlying(url, init);
   }) as typeof fetch;
   const creator = f.prime('denied');
-  void creator.catch(() => {});
-  await creatorStarted;
-  const waiter = f.prime('valid');
+  let waiter: Promise<void> | undefined;
+  let result: PromiseSettledResult<void>[] = [];
   try {
-    while (f.counts().manifests < 2) await Bun.sleep(1);
+    await waitForFixturePhase(() => deniedDownloads > 0, creator, 'creator download');
+    waiter = f.prime('valid');
+    await waitForFixturePhase(() => f.counts().manifests >= 2, waiter, 'waiter manifest');
     await Bun.sleep(20);
-  } finally { release(); }
-  const result = await Promise.allSettled([creator, waiter]);
+  } finally {
+    release();
+    result = await Promise.allSettled(waiter ? [creator, waiter] : [creator]);
+  }
   expect(result.map(item => item.status)).toEqual(['rejected', 'fulfilled']);
   expect(deniedDownloads).toBe(1);
   expect(validDownloads).toBe(1);
