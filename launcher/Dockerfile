@@ -109,6 +109,9 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
     2>/dev/null || true
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
+COPY api/src/packaged-runtime.sh ./packaged-runtime.sh
+COPY docker/packaged-pipe-runtime.sh /tmp/packaged_pipe_runtime.sh
+RUN /bin/bash /tmp/packaged_pipe_runtime.sh && rm /tmp/packaged_pipe_runtime.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
 COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
 COPY docker/sandbox-pkg /usr/local/bin/sandbox-pkg

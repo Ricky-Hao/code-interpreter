@@ -5,7 +5,7 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "build": "bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*' && bun build ./src/tool-call-pipe-broker.ts --target=node --format=cjs --outfile=.build/tool-call-pipe-broker.cjs",
+    "build": "bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*' && bun build ./src/tool-call-pipe-broker.ts --target=node --format=cjs --outfile=.build/tool-call-pipe-broker.cjs && bun build ./src/pipe-process-smoke.ts --minify --target=bun --outfile=.build/pipe-process-smoke.js",
     "start": "bun run .build/index.js",
     "test": "bun test"
   },
@@ -22,6 +22,7 @@
     "semver": "^7.8.0"
   },
   "devDependencies": {
+    "@balena/dockerignore": "1.0.2",
     "@types/bun": "^1.3.14",
     "@types/express": "^5.0.0",
     "@types/semver": "^7.5.8",

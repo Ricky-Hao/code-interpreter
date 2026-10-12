@@ -931,8 +931,15 @@ mod tests {
             "SANDBOX_JOB_GID_BASE",
             "SANDBOX_JOB_UID_COUNT",
             "SANDBOX_UNDECLARED_KNOB",
+            // The guest entrypoint chooses its packaged addon, never host code.
+            "SANDBOX_PIPE_ADDON",
+            "NODE_OPTIONS",
+            "LD_PRELOAD",
+            "BUN_OPTIONS",
         ] {
-            assert!(!is_allowed_guest_env_key(key, true), "{key} should not enter the sandbox guest");
+            for egress_enabled in [false, true] {
+                assert!(!is_allowed_guest_env_key(key, egress_enabled), "{key} should not enter the sandbox guest");
+            }
         }
     }
 
@@ -949,12 +956,15 @@ mod tests {
             "SANDBOX_RESOLV_CONF_B64",
             "SANDBOX_RUN_TIMEOUT",
             "SANDBOX_PER_JOB_UIDS",
+            "SANDBOX_FULL_DEBIAN_MODE",
             "SANDBOX_VM_CONTROL_TOKEN",
             "NSJAIL_CONFIG",
             "PORT",
             "PATH",
         ] {
-            assert!(is_allowed_guest_env_key(key, true), "{key} should enter the sandbox guest");
+            for egress_enabled in [false, true] {
+                assert!(is_allowed_guest_env_key(key, egress_enabled), "{key} should enter the sandbox guest");
+            }
         }
     }
 

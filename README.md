@@ -94,6 +94,16 @@ this repository does not establish that a production manifest sets these values.
 See [FP-004](docs/fork-patches/full-debian-microvm.md) for ownership regressions
 and remaining real-KVM acceptance requirements.
 
+All packaged guest entrypoints restore the trusted anonymous-pipe addon path
+`/usr/local/lib/anonymous-pipes.node` and check the bundled API transport under
+the supervisor policy before accepting traffic. Docker `ENV` does not survive
+copying a guest rootfs into a launcher image; passing a host addon override is
+not required or supported by the packaged entrypoint. The API, standalone
+launcher, and combined worker image builds test this with a cleared environment
+and missing/corrupt-addon cases. These build gates still require successful
+image execution and real KVM smoke verification; see
+[FP-006](docs/fork-patches/upstream-security-transports.md).
+
 Input and output files keep the existing API contract. The guest downloads
 file references through the egress gateway into its private `/mnt/data`, scans
 generated files, and uploads them before returning the response. LibreChat and

@@ -215,6 +215,9 @@ RUN bun run build
 RUN mkdir -p /pkgs /tmp/sandbox
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
+COPY api/src/packaged-runtime.sh ./packaged-runtime.sh
+COPY docker/packaged-pipe-runtime.sh /tmp/packaged_pipe_runtime.sh
+RUN /bin/bash /tmp/packaged_pipe_runtime.sh && rm /tmp/packaged_pipe_runtime.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
 COPY api/src/hosted-app-launcher.sh /usr/local/bin/codeapi-hosted-app-launcher
 COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh

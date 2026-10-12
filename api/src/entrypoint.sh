@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+. /sandbox_api/packaged-runtime.sh
+
 if [ "${SANDBOX_FULL_DEBIAN_MODE:-false}" = "true" ]; then
     /usr/local/libexec/codeapi-full-debian-overlay.sh
     if ! ip link set lo up; then
