@@ -29,6 +29,9 @@ jobs:
       - name: KVM guest resolver handoff
         run: tests/kvm_guest_dns.sh
 
+      - name: Guest resolver low-UID filesystem permissions
+        run: sudo bash docker/guest-resolver-permissions.sh api/src/guest-dns.sh docker/runtime-resolver.sh
+
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 

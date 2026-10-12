@@ -48,6 +48,7 @@
 9. 独立审阅确认旧基础 devpts 的 `gid=5` 在受限模式仅映射 GID 65534 时会导致 mount EINVAL。后续本地修复将基础配置改为 `gid=65534`，仅 Full Debian renderer 将 devpts 转为 `gid=5`，对应完整 `0:0:65536` GID 映射；保留 PTY options 与安全 mount flags。回归同时检查两种配置与实际 `buildArgs` 范围，不能只断言字符串存在。
 10. 新增 renderer/测试的 CommonJS/import.meta 类型冲突已修复；使用 `require.main === module` 与 `__dirname`。测试实际运行 guest entrypoint 所用的 Bun CLI，验证输出等于 renderer 并具有 0600 权限。
 11. rootfs 文件复制不继承 Docker `ENV`。所有 packaged guest 从同一 `packaged-runtime.sh` 恢复固定 addon 路径 `/usr/local/lib/anonymous-pipes.node`，在 overlay/NsJail smoke/API 启动前用 supervisor policy 验证 bundled `spawnPipeProcess`。不能只给 host manager 设置 ENV、扩大 launcher whitelist，或把 addon 复制到开发目录 `.build` 来掩盖缺陷；见 [FP-006](upstream-security-transports.md)。
+12. `/etc` 写层和 `/run` remount 必须保留可供 apt 低 UID 遍历的 resolver 链：仅新建 DNS 数据目录0755/文件0444，root-owned且低 UID不可写；不能以保留私有 control 目录为由把公开 DNS 目录设0700，也不能整体 chmod `/run` 或关闭 apt sandbox。三镜像构建的 [权限 fixture](../../docker/guest-resolver-permissions.sh) 在 umask0077 下验证真实 UID42/65534 读取与拒绝写入，要求见 [FP-002](opt-in-network-dns-ca.md)。
 
 ## Supervisor 所有权与部署要求
 
@@ -82,6 +83,8 @@ bash -n docker/full-debian-overlay.sh api/src/entrypoint.sh
 **本轮发布修复验证：** input-manifest fixture 自有依赖 lease 并恢复测试配置，四项 CI 失败在实际 UID/GID 65534 复现后修复；增加两项有界等待/早期错误传播回归。非 root 三文件 39 pass，root 相关五文件 68 pass，API 全量 512 pass / 2 skip / 0 fail；service 保留此前 1214 pass / 17 skip 证据，本轮未重跑。API typecheck 仍有与上次固定上游基线完全等价的 7 项诊断，不宣称全局类型检查通过。
 
 **2026-10-13 addon 修复：** 用户报告六镜像发布 run `38271267738` 后，实际 KVM 普通 Python smoke 因 `/sandbox_api/.build/anonymous-pipes.node` 缺失返回 502；旧服务已由部署方恢复。此故障说明 shell NsJail smoke/health 不证明 API native transport 可用。本地修复后 API 515 pass / 2 skip，launcher 19 项纯单元测试通过，Node22 headers 编译的 Node-API addon 在 Bun 1.4.2/supervisor 下完成主机进程管道往返；新增三个 image build gate 在真实包内路径以清空环境验证两模式及缺失/损坏反例。Docker/KVM 验证尚待执行；本地最小 chroot 的 Bun 在 JS 启动前 abort，不能把主机 ABI 通过算作包内启动通过。完整失败/复测证据：`/workspaces/codeapi-addon-fix-20261013/report.md`。
+
+**随后真实 KVM 与 resolver 修复（用户提供）：** `7180b70b20c26ccc9b87b6f30fe75f054961f532` 全部测试/六镜像发布 run `38313843788` 成功；实际 Python/Bash/UTF8 artifact、loopback/PTY/shm/pip 已通过，addon 已生效。apt UID42 因 DNS 父目录0700而失败，部署方已恢复旧服务。当前局部修复已用真实 UID42 的原始 Permission denied→成功读取及写入拒绝复现验证，相关 API 59 pass；这是 `/etc` copy-up/保留 `/run` 的文件系统模型，未在本机挂载真实 overlay 或运行新镜像 apt。完整证据 `/workspaces/codeapi-resolver-fix-20261013/report.md`；部署方仍需真实 apt 复测，不把旧服务恢复或此前 pip 成功等同于 apt 验收。
 
 **必须补做的真实验收：** 在隔离 KVM fixture 构建 `sandbox-runner-full-debian`，通过当前签名执行接口检查 guest UID 0、安装并运行 Debian 包、在 `/tmp` 编译执行、PTY/shm/FD、常规 Python/Node、同 guest nonce loopback；下载 `/mnt/data` 产物后确认 VM 消失。下次执行不得看到旧 OS/包/进程。启网/禁网、错误 token/manifest、timeout/overflow/cancellation/readiness failure 均须验证资源清空。
 

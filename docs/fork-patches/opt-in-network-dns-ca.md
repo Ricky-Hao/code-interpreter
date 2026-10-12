@@ -14,6 +14,7 @@
 - 默认受限模式使用独立 net namespace，拒绝普通 Internet socket；启用后只放行必要的 AF_INET/AF_INET6。产物/工具网关授权不是通用流量防火墙。
 - Full Debian 禁止外网时仍允许独立 net namespace 内的 loopback；不得因允许本地 socket 而使用 `--disable_clone_newnet` 接通外网。
 - 保留 nameserver、search/options 和服务域名；容器 loopback resolver 经正确 relay，非法/缺失解析配置 fail-fast，不悄悄替换公共 DNS。
+- guest resolver 是公开 DNS 数据：新建 `/run/codeapi-resolver` 必须 root-owned0755，`resolv.conf` 为 root-owned0444；低 UID 包账户必须能穿过 `/etc/resolv.conf` 链接读取且不能写入/替换。不能扩大 `/run` 其他目录权限或改动 root-only control/config 目录。
 - 受限 jail 的 `/etc/ssl/certs` 只读，TLS 不跳过证书验证；Full Debian 只可改动自己的临时 guest trust。
 - metrics ingress 独立于 egress 开关。socketpair/sendmsg/sendmmsg/io_uring、VSOCK 和 kernel-control family 约束遵循 [FP-006](upstream-security-transports.md)。
 
@@ -33,6 +34,7 @@
 4. Full Debian 将已有 `/run` tmpfs remount，避免另盖 tmpfs 隐藏 DNS。三个 API rootfs 路径都准备 guest DNS 目标。
 5. Passt 路径不启动共享 TSI 53 端口 relay；每 VM 在 API 启动前经 virtio-net/DHCP 配置 DNS，缺接口/DHCP 失败立即退出。
 6. Helm 测试已改为离线渲染，保留 metrics ingress peers。fixture 成功不能替代 jail 中真实解析 syscall 的测试。
+7. rebase 时同时保留 fresh-directory/no-reuse、拒绝 `/run` symlink 和**写完文件后才发布0755目录**的顺序。不能恢复旧0700目录断言：即使 bind 后文件0444，apt UID42 也无法遍历。三条 guest image 构建链均执行 [低 UID 文件系统 fixture](../../docker/guest-resolver-permissions.sh)，脚本位于 Dockerignore 允许的 `docker/`，不开放 `tests/` build context。
 
 ## 正反向验收
 
@@ -40,11 +42,14 @@
 (cd api && bun test src/config.test.ts src/config-defaults.test.ts src/nsjail.test.ts)
 bash tests/kvm_guest_dns.sh
 bash tests/runtime_resolver_handoff.sh
+sudo bash docker/guest-resolver-permissions.sh api/src/guest-dns.sh docker/runtime-resolver.sh
 bash tests/network_policy_networking.sh
 bash tests/sandbox_runner_metrics.sh
 ```
 
 前两个 shell fixture 不需要集群；策略/metrics 渲染需要本地 Helm、jq、Python/PyYAML。
+
+低 UID fixture 需要 root 和已有 util-linux `setpriv`，以真实 UID42/65534、GID65534、清空 supplementary groups/capabilities 验证 DAC。只在自有临时树模型化 baked `/etc` copy-up 与保留 `/run`，不 mount、不联网、不运行 apt；也验证控制目录仍0700/文件0600、父目录/文件不可写及不可替换。CI root step 和三个 Docker BUILD gate 共用此 fixture。
 
 **正向：** 私有/routable resolver、search/options、多种 loopback 表示、自定义 guest 入口、显式联网、Full Debian 独立 loopback 和 CA mount。启用 egress 渲染为 `[{}]`，metrics 来源仍明确限定。
 
@@ -52,6 +57,8 @@ bash tests/sandbox_runner_metrics.sh
 
 **已验证：** 上述配置/策略断言包含在审阅后 API 510 pass / 2 skip / 0 fail 内；四个 DNS/策略/metrics shell 检查沿用此前通过证据，passthrough 无共享 relay fixture 通过。
 **真实验收未执行：** 在隔离 KVM fixture 中分别解析受控公网域名和私有服务，服务换 IP 后仍按域名连接，可信 TLS 成功且不可信证书失败；禁网时相同外部连接失败、同 guest nonce loopback 成功。不能用静态测试声称 CA/apt 联网已成功。
+
+**2026-10-13 resolver 权限修复：** 用户报告 `7180b70` 镜像发布 run `38313843788` 后实际 KVM 的 addon/普通执行、UTF8 artifact、loopback/PTY/shm/pip 已通过，但 apt UID42 在 root:root0700 resolver 父目录下读取0444文件仍遭 Permission denied。已在本地相同 UID/mode 下先复现失败，再以0755/0444通过两种 guest 布局；DNS handoff、invalid-input、默认禁网和原 addon build-context 检查通过。此为权限/fixture证据，真实新镜像 apt 复测仍待部署方执行；完整命令/失败日志见 `/workspaces/codeapi-resolver-fix-20261013/report.md`。
 
 ## 退役条件
 

@@ -26,11 +26,19 @@ configure_guest_dns() {
         echo 'ERROR: KVM guest requires resolver configuration from launcher-entrypoint.sh' >&2
         return 1
     fi
+    if [ -L "$root/run" ]; then
+        echo 'ERROR: guest resolver runtime directory must not be a symlink' >&2
+        return 1
+    fi
     # A fresh, root-owned directory prevents a sandbox UID from replacing DNS
     # configuration in the runtime mount. Never reuse a pre-existing entry.
     (umask 077; mkdir "$target") || return 1
     printf '%s\n' "$resolv_conf" > "$target/resolv.conf" || return 1
-    chmod 600 "$target/resolv.conf" || return 1
+    # Resolver data is public, unlike control/config secrets. Publish only this
+    # new directory after writing: low-UID package helpers need to traverse the
+    # baked /etc/resolv.conf link even with startup umask 077 or /etc copy-up.
+    chmod 0444 "$target/resolv.conf" || return 1
+    chmod 0755 "$target" || return 1
     unset SANDBOX_RESOLV_CONF
 }
 

@@ -221,6 +221,9 @@ RUN /bin/bash /tmp/packaged_pipe_runtime.sh && rm /tmp/packaged_pipe_runtime.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
 COPY api/src/hosted-app-launcher.sh /usr/local/bin/codeapi-hosted-app-launcher
 COPY docker/runtime-resolver.sh /usr/local/libexec/codeapi-runtime-resolver.sh
+COPY docker/guest-resolver-permissions.sh /tmp/guest-resolver-permissions.sh
+RUN bash /tmp/guest-resolver-permissions.sh /sandbox_api/guest-dns.sh /usr/local/libexec/codeapi-runtime-resolver.sh \
+    && rm /tmp/guest-resolver-permissions.sh
 COPY docker/sandbox-pkg /usr/local/bin/sandbox-pkg
 COPY docker/full-debian-overlay.sh /usr/local/libexec/codeapi-full-debian-overlay.sh
 RUN chmod +x ./entrypoint.sh \

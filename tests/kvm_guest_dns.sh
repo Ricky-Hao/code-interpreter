@@ -16,8 +16,9 @@ configure_guest_dns "$TEST_DIR/guest"
 printf 'nameserver 127.0.0.11\noptions ndots:0\n' > "$TEST_DIR/expected"
 cmp "$TEST_DIR/expected" "$TEST_DIR/guest/etc/resolv.conf"
 [[ ! -v SANDBOX_RESOLV_CONF ]]
-# Ownership protection: no group/other permissions on the runtime directory.
-[[ "$(ls -ld "$TEST_DIR/guest/run/codeapi-resolver" | cut -c1-10)" == 'drwx------' ]]
+# DNS data is readable/traversable, but not writable, by package-helper UIDs.
+[[ "$(stat -c '%a' "$TEST_DIR/guest/run/codeapi-resolver")" == 755 ]]
+[[ "$(stat -c '%a' "$TEST_DIR/guest/run/codeapi-resolver/resolv.conf")" == 444 ]]
 
 # A fresh boot can use Kubernetes DNS/search paths without rebuilding the root.
 rm -rf "$TEST_DIR/guest/run/codeapi-resolver"
@@ -47,6 +48,40 @@ if configure_guest_dns "$TEST_DIR/guest" 2>/dev/null; then
 fi
 [[ ! -e "$TEST_DIR/foreign/resolv.conf" ]]
 rm "$TEST_DIR/guest/run/codeapi-resolver"
+# A dangling target link must also be rejected without following it.
+ln -s "$TEST_DIR/foreign/missing" "$TEST_DIR/guest/run/codeapi-resolver"
+if configure_guest_dns "$TEST_DIR/guest" 2>/dev/null; then
+    echo 'accepted dangling runtime DNS symlink' >&2; exit 1
+fi
+[[ ! -e "$TEST_DIR/foreign/missing" ]]
+rm "$TEST_DIR/guest/run/codeapi-resolver"
+# Reject an indirect runtime parent link before creating/chmoding anything in
+# a foreign (host-path stand-in) directory. All paths here are fixture-owned.
+mv "$TEST_DIR/guest/run" "$TEST_DIR/guest/run-owned"
+ln -s "$TEST_DIR/foreign" "$TEST_DIR/guest/run"
+chmod 700 "$TEST_DIR/foreign"
+printf 'untouched\n' > "$TEST_DIR/foreign/sentinel"
+if configure_guest_dns "$TEST_DIR/guest" 2>/dev/null; then
+    echo 'accepted symlinked runtime parent' >&2; exit 1
+fi
+[[ ! -e "$TEST_DIR/foreign/codeapi-resolver" ]]
+[[ "$(stat -c '%a' "$TEST_DIR/foreign")" == 700 ]]
+[[ "$(cat "$TEST_DIR/foreign/sentinel")" == untouched ]]
+rm "$TEST_DIR/guest/run"
+mv "$TEST_DIR/guest/run-owned" "$TEST_DIR/guest/run"
+# A stale directory containing a file symlink must not be reused or chmoded.
+mkdir "$TEST_DIR/guest/run/codeapi-resolver"
+chmod 700 "$TEST_DIR/guest/run/codeapi-resolver"
+chmod 400 "$TEST_DIR/foreign/sentinel"
+ln -s "$TEST_DIR/foreign/sentinel" "$TEST_DIR/guest/run/codeapi-resolver/resolv.conf"
+if configure_guest_dns "$TEST_DIR/guest" 2>/dev/null; then
+    echo 'accepted stale DNS directory with a foreign file link' >&2; exit 1
+fi
+[[ "$(stat -c '%a' "$TEST_DIR/guest/run/codeapi-resolver")" == 700 ]]
+[[ "$(stat -c '%a' "$TEST_DIR/foreign/sentinel")" == 400 ]]
+[[ "$(cat "$TEST_DIR/foreign/sentinel")" == untouched ]]
+rm "$TEST_DIR/guest/run/codeapi-resolver/resolv.conf"
+rmdir "$TEST_DIR/guest/run/codeapi-resolver"
 unset SANDBOX_RESOLV_CONF
 if configure_guest_dns "$TEST_DIR/guest" 2>/dev/null; then
     echo 'accepted missing guest resolver' >&2; exit 1
@@ -66,6 +101,16 @@ printf 'nameserver 192.0.2.53\n' > "$TEST_DIR/direct/etc/resolv.conf"
 cp "$TEST_DIR/direct/etc/resolv.conf" "$TEST_DIR/expected"
 configure_guest_dns "$TEST_DIR/direct"
 cmp "$TEST_DIR/expected" "$TEST_DIR/direct/etc/resolv.conf"
+# Non-guest symlinks are left alone at runtime. Rootfs preparation replaces
+# only the link itself, never truncates/chmods its foreign target.
+rm "$TEST_DIR/direct/etc/resolv.conf"
+ln -s "$TEST_DIR/foreign/sentinel" "$TEST_DIR/direct/etc/resolv.conf"
+configure_guest_dns "$TEST_DIR/direct"
+[[ "$(readlink "$TEST_DIR/direct/etc/resolv.conf")" == "$TEST_DIR/foreign/sentinel" ]]
+prepare_guest_dns "$TEST_DIR/direct"
+[[ "$(readlink "$TEST_DIR/direct/etc/resolv.conf")" == ../run/codeapi-resolver/resolv.conf ]]
+[[ "$(cat "$TEST_DIR/foreign/sentinel")" == untouched ]]
+[[ "$(stat -c '%a' "$TEST_DIR/foreign")" == 700 ]]
 
 # Exercise the actual launcher script up to exec, substituting only its binary.
 # Service names (including HTTPS authority and IPv6) must never be rewritten.
@@ -276,6 +321,12 @@ for name, count in [('api/Dockerfile', 3), ('docker/Dockerfile.worker-sandbox', 
             assert stage.index(' / /sandbox-rootfs/') < stage.index('--prepare-rootfs /sandbox-rootfs'), name
         if '/usr/local/bin/build-rootfs-image.sh /sandbox-rootfs /sandbox-rootfs.img' in stage:
             assert stage.index('--prepare-rootfs /sandbox-rootfs') < stage.index('/usr/local/bin/build-rootfs-image.sh /sandbox-rootfs /sandbox-rootfs.img'), name
+    assert 'COPY docker/guest-resolver-permissions.sh /tmp/guest-resolver-permissions.sh' in text, name
+    assert 'RUN bash /tmp/guest-resolver-permissions.sh /sandbox_api/guest-dns.sh /usr/local/libexec/codeapi-runtime-resolver.sh' in text, name
+# Full Debian must preserve the resolver tree when adding writable OS layers.
+overlay = (root / 'docker/full-debian-overlay.sh').read_text()
+assert 'mount -o remount,rw,nosuid,nodev,size=128m /run' in overlay
+assert 'mount -t tmpfs' not in overlay
 text = (root / 'launcher/src/main.rs').read_text()
 assert '"SANDBOX_RESOLV_CONF"' in text.split('const ALLOW_EXACT:')[1].split('];')[0]
 argv = text.split('let guest_args:')[1].split('let env_strs:')[0]
