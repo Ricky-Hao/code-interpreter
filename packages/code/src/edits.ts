@@ -105,18 +105,29 @@ export function applyTextEdits(
   let working = text;
   let lineIndex: LineIndex | undefined;
   const lines = (): LineIndex => (lineIndex ??= new LineIndex(working));
+  // Diagnostics depend only on oldText, the current text, and matching (fixed
+  // for this call). Keep at most one per distinct missing needle in this batch;
+  // matching still runs for every edit because newText/replaceAll can affect it.
+  const missingDiagnostics = new Map<string, ReturnType<typeof describeMissing>>();
   const matches: WorkspaceEditMatch[] = [];
   const failures: EditFailure[] = [];
   edits.forEach((edit, index) => {
     const outcome = findEditMatch(working, edit, matching, lines);
     if (outcome.status === 'matched') {
-      working = outcome.updated ?? replaceRanges(working, outcome.ranges);
+      const updated = outcome.updated ?? replaceRanges(working, outcome.ranges);
+      if (updated !== working) missingDiagnostics.clear();
+      working = updated;
       lineIndex = undefined;
       matches.push({ strategy: outcome.strategy, occurrences: outcome.occurrences });
       return;
     }
     if (outcome.status === 'none') {
-      failures.push({ index, ...describeMissing(working, edit.oldText, matching, lines) });
+      let diagnostic = missingDiagnostics.get(edit.oldText);
+      if (diagnostic === undefined) {
+        diagnostic = describeMissing(working, edit.oldText, matching, lines);
+        missingDiagnostics.set(edit.oldText, diagnostic);
+      }
+      failures.push({ index, ...diagnostic });
       return;
     }
     failures.push({

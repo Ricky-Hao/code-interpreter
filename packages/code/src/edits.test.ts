@@ -603,6 +603,85 @@ test('line diagnostic index follows earlier successful batch edits', () => {
   assert.match(error.message, /Edit 3: old_text was not found; its first line appears at line 3/);
 });
 
+test('repeated missing diagnostics scan once per oldText while keeping every failure independent', (t) => {
+  const sentinel = 'const label = "😀\u2028current";';
+  const source = `KEEP\r\n${sentinel}\r\nreturn label;\r\n`;
+  const edits = [
+    { oldText: 'const label = "other";\nreturn label;', newText: 'first' },
+    { oldText: 'absent\nblock', newText: '' },
+  ];
+  const trim = String.prototype.trim;
+  let scans = 0;
+  t.mock.method(String.prototype, 'trim', function (this: string) {
+    if (String(this) === sentinel) scans++;
+    return trim.call(this);
+  });
+  const expected = edits.map((edit) => rejection(() => applyTextEdits(source, [edit])).failures[0]);
+  const oncePerNeedle = scans;
+  assert.ok(oncePerNeedle > 0, 'the fixture must visit the diagnostic source lines');
+  scans = 0;
+  const error = rejection(() => applyTextEdits(source, [
+    edits[0], edits[1],
+    { oldText: 'KEEP', newText: 'KEEP' }, // A successful no-op leaves diagnostics valid.
+    { ...edits[0], newText: 'different replacement', replaceAll: true },
+    { ...edits[1], newText: 'another replacement' },
+  ]));
+  assert.equal(scans, oncePerNeedle, 'identical missing diagnostics must not rescan unchanged text');
+  const failures = [
+    { ...expected[0], index: 0 }, { ...expected[1], index: 1 },
+    { ...expected[0], index: 3 }, { ...expected[1], index: 4 },
+  ];
+  assert.deepEqual(error.failures, failures);
+  assert.equal(error.message, new WorkspaceEditMatchError(failures, 5).message);
+  assert.equal(Buffer.from(error.message).toString('utf8'), error.message);
+  error.failures[0].reason = 'caller mutation';
+  assert.equal(error.failures[2].reason, expected[0].reason);
+});
+
+test('repeated missing diagnostics follow changed text even when its length stays the same', () => {
+  const source = 'header\r\nconst value = "😀";\r\nreturn value;\r\n';
+  const missing = { oldText: 'const value = "other";\nreturn value;', newText: 'unused' };
+  const changed = source.replace('😀', '好啊');
+  const shifted = changed.replace('header', 'first\nsecond');
+  assert.equal(changed.length, source.length);
+  const snapshots = [source, changed, shifted];
+  const expected = snapshots.map((text, index) => ({
+    ...rejection(() => applyTextEdits(text, [missing])).failures[0], index: index * 2,
+  }));
+  assert.notEqual(expected[0].excerpt, expected[1].excerpt);
+  assert.notEqual(expected[1].excerpt, expected[2].excerpt);
+  const error = rejection(() => applyTextEdits(source, [
+    missing, { oldText: '😀', newText: '好啊' },
+    missing, { oldText: 'header', newText: 'first\nsecond' }, missing,
+  ]));
+  assert.deepEqual(error.failures, expected);
+  assert.equal(error.message, new WorkspaceEditMatchError(expected, 5).message);
+});
+
+test('missing diagnostic reuse never replaces matching with different wrappers, replaceAll, or modes', () => {
+  const source = 'foo   bar\nfoo   bar\n';
+  const missing = { oldText: 'foo bar\n', newText: 'baz qux' };
+  const ambiguous = { ...missing, newText: 'baz qux\n' };
+  const replacement = { ...ambiguous, replaceAll: true };
+  const initial = rejection(() => applyTextEdits(source, [missing], 'tolerant')).failures[0];
+  const multiple = rejection(() => applyTextEdits(source, [ambiguous], 'tolerant')).failures[0];
+  assert.match(multiple.reason, /matched 2 locations/);
+  const applied = applyTextEdits(source, [replacement], 'tolerant');
+  assert.equal(applied.text, 'baz qux\nbaz qux\n');
+  assert.deepEqual(applied.matches, [{ strategy: 'whitespace-normalized', occurrences: 2 }]);
+  const after = rejection(() => applyTextEdits(applied.text, [missing], 'tolerant')).failures[0];
+  const error = rejection(() => applyTextEdits(source, [missing, missing, ambiguous, replacement, missing], 'tolerant'));
+  assert.deepEqual(error.failures, [
+    initial, { ...initial, index: 1 }, { ...multiple, index: 2 }, { ...after, index: 4 },
+  ]);
+  const exact = rejection(() => applyTextEdits('foo   bar\n', [missing, missing], 'exact'));
+  const tolerant = rejection(() => applyTextEdits('foo   bar\n', [missing, missing], 'tolerant'));
+  assert.match(exact.failures[0].reason, /different whitespace/);
+  assert.doesNotMatch(tolerant.failures[0].reason, /different whitespace/);
+  assert.equal(exact.failures[1].reason, exact.failures[0].reason);
+  assert.equal(tolerant.failures[1].reason, tolerant.failures[0].reason);
+});
+
 test('newline-dense files do not materialize millions of line objects across failed batch edits', () => {
   const source = 'a\n'.repeat(450_000);
   const edits = Array.from({ length: 80 }, () => ({ oldText: 'missing\ntext', newText: 'other' }));
