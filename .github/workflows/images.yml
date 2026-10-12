@@ -56,6 +56,7 @@ env:
 jobs:
   plan:
     name: Plan
+    if: github.repository == 'LibreChat-AI/code-interpreter'
     runs-on: ubuntu-24.04
     outputs:
       images: ${{ steps.images.outputs.images }}

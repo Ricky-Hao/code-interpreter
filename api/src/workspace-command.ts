@@ -2,10 +2,15 @@ import * as path from 'node:path';
 import * as fsp from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
 
-import { aggregateBashExtras } from './job';
+import { aggregateBashExtras, sandboxDependencyEnv, removeDependencyNodeModulesSymlink } from './job';
 import { execute, type NsJailResult } from './nsjail';
 import { getLatestRuntimeMatchingLanguageVersion } from './runtime';
 import type { Runtime } from './runtime';
+import {
+  createSandboxWorkspace,
+  cleanupSandboxWorkspace,
+  retainWorkspaceCleanupUntilRemoved,
+} from './workspace-isolation';
 
 const COMMAND_MAX_BYTES = 32 * 1024;
 const COMMAND_MAX_TIMEOUT_MS = 5 * 60_000;
@@ -43,6 +48,7 @@ export class WorkspaceCommandRequestError extends Error {
 export interface WorkspaceCommandExecutionOptions {
   workspaceRoot: string;
   executeNsJail?: typeof execute;
+  createDependencyWorkspace?: typeof createSandboxWorkspace;
   runtime?: Runtime;
 }
 
@@ -170,31 +176,52 @@ export async function executeWorkspaceCommand(
     SANDBOX_LANGUAGE: 'bash',
   };
   const extraPkgdirs = aggregateBashExtras(runtime.pkgdir, envVars);
+  Object.assign(envVars, sandboxDependencyEnv(envVars));
   const relativeCwd = path.relative(workspaceRoot, cwd).split(path.sep).join('/');
-  const result = await (options.executeNsJail ?? execute)({
-    command: [
-      '/bin/bash',
-      '--noprofile',
-      '--norc',
-      '-c',
-      'cd -- "$1" && exec /bin/bash --noprofile --norc -c "$2"',
-      'librechat-code',
-      relativeCwd ? `/mnt/data/${relativeCwd}` : '/mnt/data',
-      body.command,
-    ],
-    envVars,
-    submissionDir: workspaceRoot,
-    pkgdir: runtime.pkgdir,
-    timeout: body.timeoutMs ?? 30_000,
-    memoryLimit: runtime.memory_limits.run,
-    outputMaxSize: body.maxOutputBytes ?? 256 * 1024,
-    extraPkgdirs,
-    identity: {
-      slot: 0,
-      uid: rootStat.uid,
-      gid: rootStat.gid,
-      perJobUid: true,
-    },
-  });
+  const identity = { slot: 0, uid: rootStat.uid, gid: rootStat.gid, perJobUid: true };
+  const dependency = await (options.createDependencyWorkspace ?? createSandboxWorkspace)(identity);
+  let result: NsJailResult;
+  try {
+    await removeDependencyNodeModulesSymlink(workspaceRoot);
+    // TMPDIR must exist even before sandbox-pkg runs. Keep the same private
+    // per-execution layout as Job, owned by the mapped workspace identity.
+    for (const name of ['tmp', '.cache', 'bin']) {
+      const directory = path.join(dependency.dir, name);
+      await fsp.mkdir(directory, { mode: 0o700 });
+      const stat = await fsp.stat(directory);
+      if (stat.uid !== identity.uid || stat.gid !== identity.gid) {
+        await fsp.chown(directory, identity.uid, identity.gid);
+      }
+    }
+    result = await (options.executeNsJail ?? execute)({
+      command: [
+        '/bin/bash',
+        '--noprofile',
+        '--norc',
+        '-c',
+        'cd -- "$1" && exec /bin/bash --noprofile --norc -c "$2"',
+        'librechat-code',
+        relativeCwd ? `/mnt/data/${relativeCwd}` : '/mnt/data',
+        body.command,
+      ],
+      envVars,
+      submissionDir: workspaceRoot,
+      dependencyDir: dependency.dir,
+      pkgdir: runtime.pkgdir,
+      timeout: body.timeoutMs ?? 30_000,
+      memoryLimit: runtime.memory_limits.run,
+      outputMaxSize: body.maxOutputBytes ?? 256 * 1024,
+      extraPkgdirs,
+      identity,
+    });
+  } finally {
+    try {
+      await removeDependencyNodeModulesSymlink(workspaceRoot);
+    } finally {
+      if (!await cleanupSandboxWorkspace(dependency)) {
+        retainWorkspaceCleanupUntilRemoved(dependency, () => {});
+      }
+    }
+  }
   return boundedResult(result, body.maxOutputBytes ?? 256 * 1024);
 }

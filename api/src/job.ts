@@ -258,7 +258,7 @@ export function ensureNodeModulesSymlink(
   }
 }
 
-async function removeDependencyNodeModulesSymlink(submissionDir: string): Promise<void> {
+export async function removeDependencyNodeModulesSymlink(submissionDir: string): Promise<void> {
   if (!submissionDir) return;
   const linkPath = path.join(submissionDir, 'node_modules');
   const stat = await fsp.lstat(linkPath).catch(() => null);

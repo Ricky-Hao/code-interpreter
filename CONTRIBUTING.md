@@ -4,33 +4,20 @@ Thanks for your interest in Code Interpreter!
 
 ## How this repository is maintained
 
-This repository is published from an internal ClickHouse monorepo, which is
-the source of truth. Internal changes that are not already public are mirrored
-here as a snapshot commit on the `sync/main` branch (spot them by the
-`Source: ClickHouse/ai@<sha>` trailer); a maintainer merges the resulting sync <!-- leak-check:allow -->
-pull request to release it to `main`.
+本 fork 直接维护检出的源码，通过审阅后的 rebase 集成上游；保留作者归属及
+rebase 前的保护引用。上游 monorepo 同步不是本 fork 的发布入口。
 
-Practical consequences:
-
-- **Pull requests are welcome.** CI runs on every PR. After a maintainer merges
-  your change here, an automated bridge opens a matching internal pull request
-  from the exact landed range. The internal review and CI gates still apply,
-  and attribution is preserved with a `Co-authored-by:` trailer.
-- **`main` accepts no direct pushes.** It advances through reviewed community
-  pull requests and automated sync pull requests; branch rules enforce this
-  with no exceptions.
-- **History is snapshot-based.** Commits here intentionally do not mirror the
-  internal commit history.
+集成前先读 [Fork 长期行为需求](docs/fork-patches/README.md)及证据报告最新章节。
+按行为和上游等价实现解决冲突，保留现代安全/回归测试。2026-10-12 的 11 个原始
+提交已全部重放，后续本地集成修复已通过审阅。本次集成未发布或部署；本地提交
+不代表获得 push/发布授权。
 
 ## Releases
 
-Tagged releases are cut from `main` as `vMAJOR.MINOR.PATCH` (with `-rcN` for
-release candidates), and each one carries the packaged Helm chart. Repository,
-API, service, and chart versions advance independently; component version bumps
-land on `main` through the pull request flow above before they are included in a
-release. Successful `main` CI automatically releases deployable changes while
-documentation, workflow, and test-only changes are skipped. See
-[docs/RELEASING.md](docs/RELEASING.md) for the full process and manual path.
+fork 拥有六个 amd64 镜像包，使用不可变 SHA 标签并记录各镜像 OCI digest。
+[FP-001](docs/fork-patches/publishing-self-hosting.md)说明发布合同、本地集成的协调修复
+及尚未完成的真实镜像验收。上游[发布文档](docs/RELEASING.md)仅供 chart/version
+工具参考，不授权本 fork 发布或重新启用同步自动化。
 
 ## Development
 

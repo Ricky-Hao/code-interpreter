@@ -13,6 +13,11 @@ upstream monorepo. CI builds and tests the checked-out source, while
 `sha-<12-character-commit>` tags. Deployments should pin the recorded OCI
 digest; the workflow intentionally does not publish mutable `latest` tags.
 
+[Fork 长期行为需求](docs/fork-patches/README.md)记录行为合同、上游等价实现、
+正反向验收和完整提交映射。2026-10-12 已完成全部 11 个原始提交的本地 rebase；
+后续本地集成包含已审阅的发布协调及兼容修复。本次集成未发布或部署，真实
+MicroVM/镜像构建验收仍待完成。
+
 ## Components
 
 - **API** - HTTP gateway that accepts code execution requests and returns results
@@ -203,8 +208,10 @@ public issue (see [CONTRIBUTING](CONTRIBUTING.md)).
 
 ## Releases
 
-Deployments should pin a [tagged release](https://github.com/LibreChat-AI/code-interpreter/releases)
-rather than track `main`, which moves whenever an internal snapshot is merged:
+This fork is maintained from its checked-out source. Use fork-built immutable
+image SHAs or digests; an upstream release tag does not include the fork runtime
+requirements. The following upstream release/chart documentation is reference
+material, not an instruction to publish or switch this fork to monorepo sync:
 
 ```bash
 git clone --branch v1.0.0 --depth 1 https://github.com/LibreChat-AI/code-interpreter.git
@@ -223,33 +230,36 @@ cut.
 
 ## Prebuilt images
 
-The [Images workflow](.github/workflows/images.yml) builds one `linux/amd64`
-image per Compose build and publishes it to GHCR whenever a push to `main`
-changes an image input:
+The fork's [build-images workflow](.github/workflows/build-images.yml) owns the
+six `linux/amd64` release images. See [FP-001](docs/fork-patches/publishing-self-hosting.md)
+for workflow/target decisions and immutable-tag requirements. The
+table below maps the modern source stages to the required fork package names:
 
-| Image (`ghcr.io/librechat-ai/…`) | Dockerfile (target) | Compose service |
+| Image (`ghcr.io/ricky-hao/…`) | Dockerfile (target) | Compose service |
 |---|---|---|
-| `code-interpreter-api` | `service/Dockerfile` (`api`) | `api` |
-| `code-interpreter-worker` | `service/Dockerfile` (`worker`) | `service-worker` |
+| `code-interpreter-api` | `service/Dockerfile.api` (`production`) | `api` |
+| `code-interpreter-worker` | `service/Dockerfile.worker` (`production`) | `service-worker` |
 | `code-interpreter-file-server` | `service/Dockerfile` (`production`) | `file_server` |
 | `code-interpreter-egress-gateway` | `service/Dockerfile.egress-gateway` (`production`) | `egress_gateway` |
 | `code-interpreter-tool-call-server` | `service/Dockerfile.tool-call-server` (`production`) | `tool_call_server` |
-| `code-interpreter-sandbox-runner` | `api/Dockerfile` (`sandbox-runner-true`) | `sandbox-runner`, `KVM_ENABLED=true` (default) |
-| `code-interpreter-sandbox-runner-direct` | `api/Dockerfile` (`sandbox-runner-false`) | `sandbox-runner`, `KVM_ENABLED=false` |
+| `code-interpreter-sandbox-runner` | `api/Dockerfile` (`sandbox-runner-full-debian`) | `sandbox-runner`（发布的 Full Debian 变体） |
+
+Direct NsJail 使用本地 `sandbox-runner-false` target；Compose 的默认构建仍为
+baked KVM。发布的 sandbox-runner 包采用 `sandbox-runner-full-debian`，
+因此选择预构建镜像时需明确对应的运行模式，不能由 Compose 默认值推断镜像内容。
 
 Tags:
 
-- `sha-<full commit SHA>` for every commit on `main` that changes an image
-  input. Commits that change none (docs, Helm, tests) get no tags, so take the
-  SHA from a successful Images run or the package page.
-- `main`, pointed at the newest commit on `main` that has all seven images.
-  The seven tags move one after another, so pin `sha-` tags for deployments
-  and treat `main` as a convenience.
+- `sha-<full commit SHA>` and `sha-<12-character commit SHA>` identify the
+  checked-out source. Use a SHA from a successful fork build for all six images.
+- Pin the recorded per-image OCI digest for exact bytes; do not assume that
+  moving branches or upstream image packages carry this fork's behavior.
 
-There is no `latest`. `sha-` tags are written once: re-running the workflow
-for a commit builds only the images whose tag is missing. For exact bytes,
+不新增 `latest` 发布。发布流程复用已有且匹配的 SHA 标签；
+部分标签、revision/digest 冲突或 registry 故障会中止，六种 mock 情况已验证。
+真实构建/发布尚未执行。For exact bytes,
 replace a service's
-`image:` below with `ghcr.io/librechat-ai/<image>@sha256:<digest>`; each image
+`image:` below with `ghcr.io/ricky-hao/<image>@sha256:<digest>`; each image
 has its own digest, listed in the summary of the run that pushed it.
 
 Pulling a public package needs no login. A private package needs
@@ -263,29 +273,28 @@ To switch a Compose host from building to pulling, save this override as
 services:
   api:
     build: !reset null
-    image: ghcr.io/librechat-ai/code-interpreter-api:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    image: ghcr.io/ricky-hao/code-interpreter-api:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
     pull_policy: missing
   service-worker:
     build: !reset null
-    image: ghcr.io/librechat-ai/code-interpreter-worker:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    image: ghcr.io/ricky-hao/code-interpreter-worker:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
     pull_policy: missing
   file_server:
     build: !reset null
-    image: ghcr.io/librechat-ai/code-interpreter-file-server:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    image: ghcr.io/ricky-hao/code-interpreter-file-server:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
     pull_policy: missing
   egress_gateway:
     build: !reset null
-    image: ghcr.io/librechat-ai/code-interpreter-egress-gateway:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    image: ghcr.io/ricky-hao/code-interpreter-egress-gateway:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
     pull_policy: missing
   tool_call_server:
     build: !reset null
-    image: ghcr.io/librechat-ai/code-interpreter-tool-call-server:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    image: ghcr.io/ricky-hao/code-interpreter-tool-call-server:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
     pull_policy: missing
   sandbox-runner:
     build: !reset null
-    # With KVM_ENABLED=false use code-interpreter-sandbox-runner-direct, which
-    # still reads runtime packages from SANDBOX_PACKAGES_PATH.
-    image: ghcr.io/librechat-ai/code-interpreter-sandbox-runner:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    # Use a fork build of the intended runner target. Direct NsJail builds locally.
+    image: ghcr.io/ricky-hao/code-interpreter-sandbox-runner:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
     pull_policy: missing
 ```
 
@@ -302,8 +311,7 @@ docker compose -f docker-compose.yaml -f docker-compose.images.yml up -d
 ```
 
 `pull_policy: missing` never re-pulls a tag the host already has, which suits
-an immutable `sha-` tag. To track `main` instead, set `CODEAPI_IMAGE_TAG=main`
-and run `pull` before every `up`.
+an immutable `sha-` tag. Prefer per-image digests for a reproducible deployment.
 
 ## Local Development
 

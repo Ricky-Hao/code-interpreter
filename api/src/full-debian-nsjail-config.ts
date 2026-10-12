@@ -31,6 +31,8 @@ export function renderFullDebianNsJailConfig(baseConfig: string): string {
     const destination = text.match(/\bdst:\s*"([^"]+)"/)?.[1];
     const renderedText = destination === '/tmp'
       ? text.replace(/^[ \t]*noexec:[ \t]*true[ \t]*$/m, '    noexec: false')
+      : destination === '/dev/pts'
+      ? text.replace(/\bgid=65534\b/, 'gid=5')
       : text;
     if (
       !WRITABLE_SYSTEM_DESTINATION.test(text)
@@ -43,7 +45,7 @@ export function renderFullDebianNsJailConfig(baseConfig: string): string {
   return output.join('');
 }
 
-if (import.meta.main) {
+if (require.main === module) {
   const [inputPath, outputPath] = process.argv.slice(2);
   if (!inputPath || !outputPath) {
     throw new Error('usage: full-debian-nsjail-config.ts INPUT OUTPUT');

@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
 import { buildArgs, execute, renderJobConfigOverlay } from './nsjail';
+import { renderFullDebianNsJailConfig } from './full-debian-nsjail-config';
 
 function valueAfter(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -34,7 +35,7 @@ function seccompPolicy(): string {
 
 describe('NsJail args', () => {
   test('mounts the system CA trust store read-only', async () => {
-    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+    const cfg = await fsp.readFile(path.join(__dirname, '../config/sandbox.cfg'), 'utf8');
     expect(cfg).toContain([
       'mount {',
       '    src: "/etc/ssl/certs"',
@@ -46,14 +47,14 @@ describe('NsJail args', () => {
   });
 
   test('provides only the fixed sandbox UID and GID identity', async () => {
-    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+    const cfg = await fsp.readFile(path.join(__dirname, '../config/sandbox.cfg'), 'utf8');
     expect(cfg).toContain('src_content: "sandbox:x:65534:65534:Sandbox user:/mnt/data:/bin/sh\\n"');
     expect(cfg).toContain('src_content: "sandbox:x:65534:\\n"');
     expect(cfg).not.toContain('root:x:0:0:');
   });
 
   test('mounts only immutable APT inputs and package status read-only', async () => {
-    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+    const cfg = await fsp.readFile(path.join(__dirname, '../config/sandbox.cfg'), 'utf8');
     for (const source of [
       '/etc/apt/sources.list',
       '/etc/apt/sources.list.d',
@@ -165,15 +166,42 @@ describe('NsJail args', () => {
   });
 
   test('provides private PTYs, shared memory, and standard random devices', async () => {
-    const cfg = await fsp.readFile(new URL('../config/sandbox.cfg', import.meta.url), 'utf8');
+    const cfg = await fsp.readFile(path.join(__dirname, '../config/sandbox.cfg'), 'utf8');
 
     expect(cfg).toContain('dst: "/dev/pts"');
     expect(cfg).toContain('fstype: "devpts"');
-    expect(cfg).toContain('options: "newinstance,ptmxmode=0666,mode=0620,gid=5"');
+    expect(cfg).toContain('options: "newinstance,ptmxmode=0666,mode=0620,gid=65534"');
     expect(cfg).toContain('src: "/dev/random"');
     expect(cfg).toContain('dst: "/dev/tty"');
     expect(cfg).toContain('dst: "/dev/shm"');
     expect(cfg).toContain('options: "size=64m,mode=1777"');
+  });
+
+  test('every devpts GID is mapped in restricted and full Debian user namespaces', async () => {
+    const base = await fsp.readFile(path.join(__dirname, '../config/sandbox.cfg'), 'utf8');
+    const original = config.full_debian_mode;
+    try {
+      for (const fullDebian of [false, true]) {
+        config.full_debian_mode = fullDebian;
+        const cfg = fullDebian ? renderFullDebianNsJailConfig(base) : base;
+        const pts = cfg.match(/mount \{[^}]*fstype: "devpts"[^}]*\}/s)?.[0] ?? '';
+        const gid = Number(pts.match(/\bgid=(\d+)/)?.[1]);
+        const args = buildArgs({
+          logPath: '/tmp/gid-map.log', pkgdir: '/pkgs/bash', timeout: 1000,
+          memoryLimit: -1, envVars: {}, command: ['/bin/true'],
+          identity: { slot: 0, uid: 200000, gid: 300000, perJobUid: true },
+        });
+        const [inside, , count] = valueAfter(args, '--group')!.split(':').map(Number);
+        expect(gid).toBe(fullDebian ? 5 : 65534);
+        expect(gid).toBeGreaterThanOrEqual(inside);
+        expect(gid).toBeLessThan(inside + count);
+        expect(pts).toContain('newinstance,ptmxmode=0666,mode=0620');
+        expect(pts).toContain('nosuid: true');
+        expect(pts).toContain('noexec: true');
+      }
+    } finally {
+      config.full_debian_mode = original;
+    }
   });
 
   test('does not bind /mnt/data via -B (the per-job cfg overlay handles it with noexec)', () => {
