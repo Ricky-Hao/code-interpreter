@@ -521,8 +521,10 @@ _ptc_print_history_entry() {
     if [ "$_ptc_is_err" = "true" ]; then
         local _ptc_msg
         _ptc_msg=$(printf '%s' "$_ptc_entry" | "$_PTC_JQ_PATH" -r '.error_message // "tool execution failed"' 2>/dev/null)
-        _ptc_write_error "$_ptc_msg"
-        exit 1
+        # A tool-reported failure is an ordinary Bash command failure. Do not
+        # poison the shared infrastructure-error channel: callers may catch it.
+        printf '%s\\n' "$_ptc_msg" >&2
+        return 1
     fi
     local _ptc_result
     _ptc_result=$(printf '%s' "$_ptc_entry" | "$_PTC_JQ_PATH" -c 'if type == "object" and has("result") then .result else . end' 2>/dev/null || printf 'null')
@@ -559,6 +561,15 @@ _ptc_call_tool() {
     if ! printf '%s' "$_ptc_input" | "$_PTC_JQ_PATH" -e -n '[inputs] as $docs | ($docs | length) == 1 and ($docs[0] | type) == "object"' >/dev/null 2>&1; then
         _ptc_write_error "tool input for $_ptc_name must be a single JSON object, got: $_ptc_input"
         exit 1
+    fi
+
+    # A corrupt history is not a tool failure or an empty replay cache. Keep
+    # this fatal even when a caller catches the tool status or removes traps.
+    if [ -e "$_PTC_HISTORY_PATH" ] || [ -L "$_PTC_HISTORY_PATH" ]; then
+        if ! "$_PTC_JQ_PATH" -e -s 'length == 1 and (.[0] | type) == "object"' "$_PTC_HISTORY_PATH" >/dev/null 2>&1; then
+            _ptc_write_error "invalid PTC replay history"
+            exit 1
+        fi
     fi
 
     local _ptc_input_hash

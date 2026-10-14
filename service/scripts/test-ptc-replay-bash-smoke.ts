@@ -4,7 +4,7 @@
  * writes it to a temp file, runs with bash directly, and verifies:
  *   (a) first run (empty history) emits the PTC sentinel block with pending
  *   (b) re-run with populated history completes and prints captured result
- *   (c) cached error entries cause non-zero exit with stderr message
+ *   (c) uncaught cached errors under set -e exit non-zero with stderr message
  *   (d) zero tool calls completes cleanly without a sentinel
  *
  * No nsjail/docker required. Run: `npx ts-node scripts/test-ptc-replay-bash-smoke.ts`
@@ -151,6 +151,7 @@ echo "Count: $count"
 
 {
   const user = `
+set -e
 result=$(get_weather '{"city":"Nowhere"}')
 echo "UNREACHABLE: $result"
 `;

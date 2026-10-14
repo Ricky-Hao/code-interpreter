@@ -1,4 +1,4 @@
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import {
     mkdirSync,
     mkdtempSync,
@@ -24,6 +24,7 @@ interface BashRunResult {
 
 interface BashRunOptions {
   history?: Record<string, unknown>;
+  historyText?: string;
   timeoutMs?: number;
 }
 
@@ -80,15 +81,16 @@ function runBash(
   const file = join(dir, 'main.sh');
   const historyPath = join(dir, 'history.json');
   writeFileSync(file, script, { mode: 0o755 });
-  writeFileSync(historyPath, JSON.stringify(history));
+  writeFileSync(historyPath, typeof options === 'number' ? JSON.stringify(history) : (options.historyText ?? JSON.stringify(history)));
   try {
-    const stdout = execFileSync('bash', [file], {
-      env: { ...process.env, PTC_HISTORY_PATH: historyPath },
+    const run = spawnSync('bash', [file], {
+      cwd: dir,
+      env: { ...process.env, PTC_HISTORY_PATH: historyPath, TMPDIR: dir },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: timeoutMs,
     });
-    return { stdout, stderr: '', exitCode: 0 };
+    return { stdout: run.stdout, stderr: run.stderr, exitCode: run.status ?? 1, signal: run.signal ?? undefined };
   } catch (err: unknown) {
     const e = err as {
       stdout?: Buffer | string;
@@ -111,6 +113,149 @@ function pendingNames(stdout: string): string[] {
   const parsed = extractPendingFromStdout(stdout, executionId);
   return (parsed.pending ?? []).map(call => call.tool_name).sort();
 }
+
+describe('Bash tool failures are catchable, protocol failures are fatal', () => {
+  const message = 'fixture tool unavailable';
+  const failed = { is_error: true, error_message: message, result: { private_detail: 'not stdout' } };
+  const history = { call_001: failed };
+
+  for (const matching of ['signature', 'legacy']) {
+    for (const repeated of [false, true]) {
+      test(`three replay rounds preserve ${matching} history and ${repeated ? 'repeated' : 'distinct'} calls`, () => {
+        const nextCall = repeated ? 'get_weather \'{"city":"fixture"}\'' : 'calculate \'{"expression":"1+1"}\'';
+        const script = assemble(`
+set -e
+rc=0
+bad=$(get_weather '{"city":"fixture"}') || rc=$?
+good=$(${nextCall})
+printf 'rc=%s bad=<%s> good=%s\\n' "$rc" "$bad" "$good"
+`);
+        const replayHistory: Record<string, unknown> = {};
+        const hostCalls: Array<{ call_id: string; tool_name: string; input: unknown }> = [];
+        for (let round = 0; round < 3; round++) {
+          const run = runBash(script, { history: replayHistory });
+          expect(run.exitCode).toBe(0);
+          expect(run.signal).toBeUndefined();
+          const parsed = extractPendingFromStdout(run.stdout, executionId);
+          expect(run.stdout).not.toContain(message);
+          expect(run.stdout).not.toContain('private_detail');
+          expect(run.stderr).toBe(round === 0 ? '' : `${message}\n`);
+          if (round < 2) {
+            expect(parsed.pending).toHaveLength(1);
+            expect(parsed.stdout).not.toContain('rc=');
+            const call = parsed.pending![0];
+            expect(call.call_id).toBe(`call_00${round + 1}`);
+            expect(call.tool_name).toBe(round === 0 || repeated ? 'get_weather' : 'calculate');
+            expect(call.input).toEqual(round === 0 || repeated ? { city: 'fixture' } : { expression: '1+1' });
+            expect(replayHistory[call.call_id]).toBeUndefined();
+            hostCalls.push(call);
+            replayHistory[call.call_id] = {
+              ...(matching === 'signature' ? {
+                tool_name: call.tool_name, input: call.input,
+                input_hash: call.input_hash, call_site: call.call_site,
+              } : {}),
+              ...(round === 0 ? failed : { result: { answer: 2 }, is_error: false }),
+            };
+          } else {
+            expect(parsed.pending).toBeNull();
+            expect(run.stdout).toBe('rc=1 bad=<> good={"answer":2}\n');
+          }
+        }
+        expect(hostCalls).toHaveLength(2);
+        expect(hostCalls.map(call => call.call_id)).toEqual(['call_001', 'call_002']);
+        expect(Object.keys(replayHistory)).toEqual(['call_001', 'call_002']);
+      });
+    }
+  }
+
+  for (const [label, code, stdout, exitCode] of [
+    ['bare status without errexit', 'get_weather \'{}\'; rc=$?; printf \'rc=%s\\n\' "$rc"', 'rc=1\n', 0],
+    ['explicit bare catch', 'set -e; rc=0; get_weather \'{}\' || rc=$?; printf \'rc=%s\\n\' "$rc"', 'rc=1\n', 0],
+    ['if catch', 'set -e; if get_weather \'{}\'; then echo wrong; else echo caught; fi', 'caught\n', 0],
+    ['command substitution catch', 'set -e; rc=0; bad=$(get_weather \'{}\') || rc=$?; printf \'rc=%s bad=<%s>\\n\' "$rc" "$bad"', 'rc=1 bad=<>\n', 0],
+    ['no errexit continues', 'bad=$(get_weather \'{}\'); echo continued', 'continued\n', 0],
+    ['final bare failure', 'get_weather \'{}\'', '', 1],
+    ['final substitution failure', 'bad=$(get_weather \'{}\')', '', 1],
+    ['uncaught errexit bare', 'set -e; get_weather \'{}\'; echo unreachable', '', 1],
+    ['uncaught errexit substitution', 'set -e; bad=$(get_weather \'{}\'); echo unreachable', '', 1],
+    ['pipeline usual last status', 'set -e; get_weather \'{}\' | cat; echo continued', 'continued\n', 0],
+    ['pipeline pipefail catch', 'set -eo pipefail; rc=0; get_weather \'{}\' | cat || rc=$?; printf \'rc=%s\\n\' "$rc"', 'rc=1\n', 0],
+    ['pipeline pipefail unhandled', 'set -eo pipefail; get_weather \'{}\' | cat; echo unreachable', '', 1],
+    ['background explicit wait catch', 'set -e; get_weather \'{}\' & pid=$!; rc=0; wait "$pid" || rc=$?; printf \'rc=%s\\n\' "$rc"', 'rc=1\n', 0],
+  ] as const) {
+    test(label, () => {
+      const run = runBash(assemble(code), { history });
+      expect(run.exitCode).toBe(exitCode);
+      expect(run.signal).toBeUndefined();
+      expect(run.stdout).toBe(stdout);
+      expect(run.stderr).toBe(`${message}\n`);
+      expect(extractPendingFromStdout(run.stdout, executionId).pending).toBeNull();
+    });
+  }
+
+  test('tool failure without a message prints only the controlled fallback', () => {
+    const run = runBash(assemble('get_weather \'{}\' || echo caught'), {
+      history: { call_001: { is_error: true, result: { detail: 'not stdout' } } },
+    });
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toBe('caught\n');
+    expect(run.stderr).toBe('tool execution failed\n');
+  });
+
+  test('signature-matched failure advances the counter and consumes a high-ID entry only once', () => {
+    const script = assemble(`
+set -e
+rc=0
+bad=$(get_weather '{}') || rc=$?
+good=$(get_weather '{}')
+printf 'rc=%s good=%s\\n' "$rc" "$good"
+`);
+    const prior = {
+      call_001: { tool_name: 'calculate', input: {}, result: 'stale' },
+      call_009: { ...failed, tool_name: 'get_weather', input: {}, call_site: 'old-line' },
+    };
+    const resumed = runBash(script, { history: prior });
+    expect(resumed.exitCode).toBe(0);
+    expect(resumed.stderr).toBe(`${message}\n`);
+    const pending = extractPendingFromStdout(resumed.stdout, executionId).pending;
+    expect(pending).toHaveLength(1);
+    expect(pending![0]).toMatchObject({ call_id: 'call_010', tool_name: 'get_weather', input: {} });
+    const final = runBash(script, { history: {
+      ...prior, call_010: { tool_name: 'get_weather', input: {}, result: 'second-result' },
+    } });
+    expect(final.exitCode).toBe(0);
+    expect(final.stdout).toBe('rc=1 good="second-result"\n');
+    expect(final.stderr).toBe(`${message}\n`);
+  });
+
+  for (const historyText of ['', '[]', '{}\n{}']) {
+    test(`invalid history envelope ${JSON.stringify(historyText)} cannot become a new pending request`, () => {
+      const run = runBash(assemble('bad=$(get_weather \'{}\') || true; exit 0'), { historyText });
+      expect(run.exitCode).toBe(1);
+      expect(run.stderr).toContain('invalid PTC replay history');
+      expect(extractPendingFromStdout(run.stdout, executionId).pending).toBeNull();
+    });
+  }
+
+  for (const disableTraps of [false, true]) {
+    for (const invalid of ['input', 'history']) {
+      test(`caught malformed ${invalid} remains fatal with ${disableTraps ? 'parent fallback' : 'normal traps'}`, () => {
+        const code = `
+${disableTraps ? 'builtin trap - DEBUG EXIT' : ''}
+bad=$(get_weather '${invalid === 'input' ? '[]' : '{}'}') || rc=$?
+echo after-catch
+exit 0
+`;
+        const run = runBash(assemble(code), { historyText: invalid === 'history' ? '{broken' : '{}' });
+        expect(run.exitCode).toBe(1);
+        expect(run.signal).toBeUndefined();
+        expect(run.stderr).toContain(invalid === 'input' ? 'must be a single JSON object' : 'invalid PTC replay history');
+        expect(extractPendingFromStdout(run.stdout, executionId).pending).toBeNull();
+        if (!disableTraps) expect(run.stdout).not.toContain('after-catch');
+      });
+    }
+  }
+});
 
 describe('generateBashReplayPreamble - private runtime directory', () => {
   test('creates every replay tempfile beneath TMPDIR', () => {
